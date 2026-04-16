@@ -282,6 +282,41 @@ def _print_repl_help() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Web command
+# ---------------------------------------------------------------------------
+
+@main.command("web")
+@click.option("--host", "web_host", default="127.0.0.1", show_default=True, help="Dinlenecek adres (0.0.0.0 = tüm arayüzler)")
+@click.option("--port", "web_port", default=5000, show_default=True, type=int, help="Port")
+@click.option("--no-browser", is_flag=True, default=False, help="Tarayıcıyı otomatik açma")
+def web_cmd(web_host, web_port, no_browser):
+    """Web arayüzünü başlat ve tarayıcıda aç."""
+    try:
+        from .web.app import app as flask_app
+    except ImportError:
+        console.print("[red]Hata:[/red] Flask bulunamadı. Kurun: pip install flask")
+        import sys; sys.exit(1)
+
+    import threading, webbrowser, time
+
+    url = f"http://{web_host if web_host != '0.0.0.0' else '127.0.0.1'}:{web_port}"
+
+    console.print()
+    console.print(f"[bold cyan]🐘 analyzer4pg[/bold cyan] web arayüzü başlatılıyor...")
+    console.print(f"   [green]→[/green] {url}")
+    console.print(f"   [dim]Durdurmak için: Ctrl+C[/dim]")
+    console.print()
+
+    if not no_browser:
+        def _open():
+            time.sleep(1.2)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
+
+    flask_app.run(host=web_host, port=web_port, debug=False, use_reloader=False)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
