@@ -42,14 +42,37 @@ def _strip_comments(sql: str) -> str:
     return sqlparse.format(sql, strip_comments=True).strip()
 
 
+def _snippet(sql: str, max_len: int = 350) -> str:
+    """Return the actual SQL (trimmed) as the 'before' example — never mock data."""
+    s = sql.strip()
+    if len(s) > max_len:
+        return s[:max_len].rstrip() + "\n-- ... (sorgu kısaltıldı)"
+    return s
+
+
+def _extract_fragment(sql: str, pattern: str) -> Optional[str]:
+    """
+    Try to extract the specific fragment of the actual SQL that matches the
+    anti-pattern (e.g. the LIKE clause, the function call, etc.).
+    Falls back to the full snippet if not found.
+    """
+    m = re.search(pattern, sql, re.IGNORECASE | re.DOTALL)
+    if m:
+        frag = m.group(0).strip()
+        return frag if len(frag) <= 300 else _snippet(sql)
+    return _snippet(sql)
+
+
 # ---------------------------------------------------------------------------
 # Individual detectors
 # ---------------------------------------------------------------------------
 
 def _check_select_star(sql: str, normalised: str) -> List[QueryRecommendation]:
     recs = []
-    # Match SELECT * or SELECT t.*
     if re.search(r"\bSELECT\s+(\w+\.)?\*", normalised):
+        # Extract table name from the actual query for a targeted suggestion
+        m = re.search(r"\bFROM\s+(\w+)", sql, re.IGNORECASE)
+        tablo = m.group(1) if m else "tablo_adi"
         recs.append(QueryRecommendation(
             priority="LOW",
             category="ANTIPATTERN",
@@ -61,8 +84,8 @@ def _check_select_star(sql: str, normalised: str) -> List[QueryRecommendation]:
                 "  - İhtiyaç duyulmayan TOAST/büyük sütunları da getirir.\n"
                 "  - Sütun sırası değiştiğinde uygulama hatalarına yol açabilir."
             ),
-            example_before="SELECT * FROM orders WHERE status = 'active'",
-            example_after="SELECT order_id, customer_id, amount, status FROM orders WHERE status = 'active'",
+            example_before=_snippet(sql),
+            example_after=f"-- SELECT * yerine ihtiyaç duyduğunuz sütunları listeleyin:\nSELECT id, ad, tarih, ... FROM {tablo} WHERE ...;",
             score_impact=3,
         ))
     return recs
@@ -82,14 +105,14 @@ def _check_leading_wildcard_like(sql: str, normalised: str) -> List[QueryRecomme
                 "  - pg_trgm extension ile GIN index kullanılabilir.\n"
                 "  - Tam metin arama için tsvector/tsquery tercih edin."
             ),
-            example_before="SELECT * FROM products WHERE name LIKE '%widget%'",
+            example_before=_extract_fragment(sql, r"\b\w+\s+I?LIKE\s+'%[^']*'"),
             example_after=(
-                "-- Seçenek 1: pg_trgm + GIN index\n"
+                "-- Seçenek 1: pg_trgm + GIN index (hızlı LIKE '%...%')\n"
                 "CREATE EXTENSION IF NOT EXISTS pg_trgm;\n"
-                "CREATE INDEX idx_products_name_trgm ON products USING gin(name gin_trgm_ops);\n"
-                "SELECT * FROM products WHERE name LIKE '%widget%';\n\n"
+                "CREATE INDEX idx_tablo_sutun_trgm ON tablo USING gin(sutun gin_trgm_ops);\n"
+                "-- Artık mevcut sorgunuz index kullanır\n\n"
                 "-- Seçenek 2: Full-text search\n"
-                "SELECT * FROM products WHERE to_tsvector('turkish', name) @@ to_tsquery('widget');"
+                "WHERE to_tsvector('turkish', sutun) @@ to_tsquery('aranan_kelime');"
             ),
             score_impact=10,
         ))
@@ -152,21 +175,18 @@ def _check_not_in_subquery(sql: str, normalised: str) -> List[QueryRecommendatio
                 "  Ayrıca büyük subquery sonuçlarında performans sorunlarına yol açar.\n"
                 "  NOT EXISTS genellikle daha iyi bir plan seçer."
             ),
-            example_before=(
-                "SELECT * FROM orders\n"
-                "WHERE customer_id NOT IN (SELECT id FROM blacklisted_customers);"
-            ),
+            example_before=_extract_fragment(sql, r"\bNOT\s+IN\s*\([\s\S]{0,200}?\)"),
             example_after=(
                 "-- NOT EXISTS kullanımı (NULL-safe ve genellikle daha hızlı)\n"
-                "SELECT o.* FROM orders o\n"
+                "SELECT t.* FROM ana_tablo t\n"
                 "WHERE NOT EXISTS (\n"
-                "    SELECT 1 FROM blacklisted_customers b\n"
+                "    SELECT 1 FROM alt_tablo a\n"
                 "    WHERE b.id = o.customer_id\n"
                 ");\n\n"
                 "-- ya da LEFT JOIN / IS NULL\n"
-                "SELECT o.* FROM orders o\n"
-                "LEFT JOIN blacklisted_customers b ON b.id = o.customer_id\n"
-                "WHERE b.id IS NULL;"
+                "SELECT t.* FROM ana_tablo t\n"
+                "LEFT JOIN alt_tablo a ON a.id = t.alt_id\n"
+                "WHERE a.id IS NULL;"
             ),
             score_impact=8,
         ))
@@ -187,8 +207,8 @@ def _check_implicit_type_cast(sql: str, normalised: str) -> List[QueryRecommenda
                 "  Bu durum index'in kullanılmamasına neden olabilir.\n"
                 "  PostgreSQL bazen dönüşümü otomatik yapar ancak plan verimsizleşebilir."
             ),
-            example_before="WHERE customer_id = '12345'   -- customer_id INTEGER iken",
-            example_after="WHERE customer_id = 12345   -- doğru tip kullanımı",
+            example_before=_extract_fragment(sql, r"\bWHERE\b.{0,120}"),
+            example_after="-- Sayısal sütunlar için sayısal literal kullanın:\nWHERE musteri_id = 12345   -- tırnak işareti olmadan",
             score_impact=5,
         ))
     return recs
@@ -211,8 +231,8 @@ def _check_or_instead_of_in(sql: str, normalised: str) -> List[QueryRecommendati
                 f"Aynı sütun '{col}' için tekrarlı OR koşulları yerine IN() daha temiz "
                 "ve bazı durumlarda daha verimlidir."
             ),
-            example_before=f"WHERE {col} = 1 OR {col} = 2 OR {col} = 3",
-            example_after=f"WHERE {col} IN (1, 2, 3)",
+            example_before=_extract_fragment(sql, rf"\b{col}\s*=\s*(?:'[^']*'|\d+)\s+OR\s+{col}\s*=.{{0,80}}"),
+            example_after=f"WHERE {col} IN (deger1, deger2, deger3)",
             score_impact=2,
         ))
     return recs
@@ -239,15 +259,12 @@ def _check_having_vs_where(sql: str, normalised: str) -> List[QueryRecommendatio
                         "  HAVING, GROUP BY sonrası filtreleme yapar — tüm gruplar hesaplandıktan sonra.\n"
                         "  WHERE koşulu gruplama öncesinde çalışır ve çok daha verimlidir."
                     ),
-                    example_before=(
-                        "SELECT department, COUNT(*) FROM employees\n"
-                        "GROUP BY department\n"
-                        "HAVING department = 'Engineering';"
-                    ),
+                    example_before=_extract_fragment(sql, r"\bHAVING\b.{0,150}"),
                     example_after=(
-                        "SELECT department, COUNT(*) FROM employees\n"
-                        "WHERE department = 'Engineering'\n"
-                        "GROUP BY department;"
+                        "-- HAVING içindeki aggregate'siz koşulu WHERE'e taşıyın:\n"
+                        "SELECT sutun, COUNT(*) FROM tablo\n"
+                        "WHERE kosul = 'deger'   -- gruplama öncesi filtre\n"
+                        "GROUP BY sutun;"
                     ),
                     score_impact=5,
                 ))
@@ -268,13 +285,13 @@ def _check_distinct_abuse(sql: str, normalised: str) -> List[QueryRecommendation
                 "  - Sadece benzersiz satırlar gerekiyorsa DISTINCT ON() kullanın.\n"
                 "  - Varlık kontrolü için EXISTS daha verimlidir."
             ),
-            example_before="SELECT DISTINCT customer_id FROM orders;",
+            example_before=_snippet(sql),
             example_after=(
                 "-- JOIN'i düzeltin veya GROUP BY kullanın\n"
-                "SELECT customer_id FROM orders GROUP BY customer_id;\n\n"
+                "SELECT sutun FROM tablo GROUP BY sutun;\n\n"
                 "-- Sadece var mı diye kontrol için\n"
-                "SELECT id FROM customers c WHERE EXISTS (\n"
-                "    SELECT 1 FROM orders o WHERE o.customer_id = c.id\n"
+                "SELECT id FROM ana_tablo a WHERE EXISTS (\n"
+                "    SELECT 1 FROM alt_tablo b WHERE b.ana_id = a.id\n"
                 ");"
             ),
             score_impact=3,
@@ -295,16 +312,10 @@ def _check_union_vs_union_all(sql: str, normalised: str) -> List[QueryRecommenda
                 "  Eğer sonuç setlerinde tekrar olamayacağı biliniyorsa "
                 "(örn. farklı tablolar), UNION ALL çok daha hızlıdır."
             ),
-            example_before=(
-                "SELECT id FROM current_orders\n"
-                "UNION\n"
-                "SELECT id FROM archived_orders;"
-            ),
+            example_before=_extract_fragment(sql, r"\bUNION\b(?!\s+ALL).{0,200}"),
             example_after=(
-                "-- Tekrarlar mümkün değilse (farklı tablolar, farklı tarih aralıkları vb.)\n"
-                "SELECT id FROM current_orders\n"
-                "UNION ALL\n"
-                "SELECT id FROM archived_orders;"
+                "-- Tekrarlar mümkün değilse UNION ALL kullanın:\n"
+                + re.sub(r"\bUNION\b(?!\s+ALL)", "UNION ALL", sql, flags=re.IGNORECASE)[:300]
             ),
             score_impact=5,
         ))
@@ -325,16 +336,12 @@ def _check_correlated_subquery(sql: str, normalised: str) -> List[QueryRecommend
                 "  N satır için N kez sorgu = N+1 problemi.\n"
                 "  Bu, büyük tablolarda ciddi performans sorununa yol açar."
             ),
-            example_before=(
-                "SELECT o.id,\n"
-                "       (SELECT c.name FROM customers c WHERE c.id = o.customer_id) AS customer_name\n"
-                "FROM orders o;"
-            ),
+            example_before=_snippet(sql),
             example_after=(
-                "-- JOIN ile tek geçişte çözün\n"
-                "SELECT o.id, c.name AS customer_name\n"
-                "FROM orders o\n"
-                "JOIN customers c ON c.id = o.customer_id;"
+                "-- SELECT listesindeki alt sorguyu JOIN'e dönüştürün:\n"
+                "SELECT t1.id, t2.sutun AS etiket\n"
+                "FROM ana_tablo t1\n"
+                "JOIN alt_tablo t2 ON t2.id = t1.alt_id;"
             ),
             score_impact=10,
         ))
@@ -356,11 +363,11 @@ def _check_count_column(sql: str, normalised: str) -> List[QueryRecommendation]:
                 "  - NULL olmayan değer sayısı için: COUNT(sütun)\n"
                 "  - Benzersiz değer sayısı için: COUNT(DISTINCT sütun)"
             ),
-            example_before="SELECT COUNT(manager_id) FROM employees;  -- NULL manager_id'ler sayılmaz",
+            example_before=_extract_fragment(sql, r"\bCOUNT\s*\([^)]+\)"),
             example_after=(
-                "SELECT COUNT(*) FROM employees;           -- toplam satır\n"
-                "SELECT COUNT(manager_id) FROM employees;  -- manager_id olan çalışanlar\n"
-                "SELECT COUNT(*) - COUNT(manager_id) FROM employees;  -- manager_id NULL olanlar"
+                "SELECT COUNT(*) FROM tablo;                    -- toplam satır\n"
+                "SELECT COUNT(sutun) FROM tablo;                -- NULL olmayanlar\n"
+                "SELECT COUNT(*) - COUNT(sutun) FROM tablo;     -- NULL olanlar"
             ),
             score_impact=2,
         ))
@@ -383,16 +390,13 @@ def _check_offset_large(sql: str, normalised: str) -> List[QueryRecommendation]:
                     "  Sayfa numarası büyüdükçe sorgu giderek yavaşlar.\n"
                     "  'Keyset pagination' (cursor-based) çok daha verimlidir."
                 ),
-                example_before=(
-                    "-- Sayfa 1000, sayfa başına 20 satır\n"
-                    "SELECT * FROM orders ORDER BY id LIMIT 20 OFFSET 20000;"
-                ),
+                example_before=_snippet(sql),
                 example_after=(
-                    "-- Keyset pagination: son görülen ID'yi referans al\n"
-                    "SELECT * FROM orders\n"
-                    "WHERE id > :last_seen_id\n"
+                    "-- Keyset pagination ile değiştirin:\n"
+                    "SELECT ... FROM tablo\n"
+                    "WHERE id > :son_gorülen_id   -- önceki sayfanın son ID'si\n"
                     "ORDER BY id\n"
-                    "LIMIT 20;"
+                    "LIMIT :sayfa_boyutu;"
                 ),
                 score_impact=5,
             ))
@@ -410,14 +414,14 @@ def _check_order_by_rand(sql: str, normalised: str) -> List[QueryRecommendation]
                 "ORDER BY RANDOM() tüm tabloyu bellekte sıralar, sonra bir satır seçer.\n"
                 "  Büyük tablolarda çok yavaştır (O(N log N) kompleksite)."
             ),
-            example_before="SELECT * FROM products ORDER BY RANDOM() LIMIT 1;",
+            example_before=_extract_fragment(sql, r"\bORDER\s+BY\s+RANDOM\s*\(\).*"),
             example_after=(
                 "-- Tabloya göre daha verimli alternatifler:\n\n"
                 "-- Seçenek 1: Yaklaşık rastgele (hızlı, tabmsample)\n"
-                "SELECT * FROM products TABLESAMPLE BERNOULLI(1) LIMIT 1;\n\n"
+                "SELECT * FROM tablo TABLESAMPLE BERNOULLI(1) LIMIT 1;\n\n"
                 "-- Seçenek 2: ID aralığında rastgele\n"
-                "SELECT * FROM products\n"
-                "WHERE id >= (SELECT (MAX(id) - MIN(id)) * RANDOM() + MIN(id) FROM products)\n"
+                "SELECT * FROM tablo\n"
+                "WHERE id >= (SELECT (MAX(id) - MIN(id)) * RANDOM() + MIN(id) FROM tablo)\n"
                 "ORDER BY id\n"
                 "LIMIT 1;"
             ),
@@ -444,15 +448,12 @@ def _check_missing_join_condition(sql: str, normalised: str) -> List[QueryRecomm
                     "  WHERE'de join koşulu yoksa kartezyen çarpım (N×M satır) üretilir.\n"
                     "  Modern SQL'de explicit JOIN sözdizimi kullanın."
                 ),
-                example_before=(
-                    "SELECT o.id, c.name\n"
-                    "FROM orders o, customers c\n"
-                    "WHERE o.customer_id = c.id;"
-                ),
+                example_before=_snippet(sql),
                 example_after=(
-                    "SELECT o.id, c.name\n"
-                    "FROM orders o\n"
-                    "JOIN customers c ON c.id = o.customer_id;"
+                    "-- Explicit JOIN sözdizimini kullanın:\n"
+                    "SELECT t1.sutun, t2.sutun\n"
+                    "FROM tablo1 t1\n"
+                    "JOIN tablo2 t2 ON t2.id = t1.tablo2_id;"
                 ),
                 score_impact=5,
             ))
@@ -472,18 +473,13 @@ def _check_unnecessary_subquery(sql: str, normalised: str) -> List[QueryRecommen
                 "  PostgreSQL bu durumda 'subquery flattening' yapabilir, ama her zaman değil.\n"
                 "  Doğrudan dış sorguda JOIN veya CTE kullanmak daha temiz ve bazen daha hızlıdır."
             ),
-            example_before=(
-                "SELECT sub.id, sub.name\n"
-                "FROM (\n"
-                "    SELECT id, name FROM customers WHERE status = 'active'\n"
-                ") sub\n"
-                "WHERE sub.name LIKE 'A%';"
-            ),
+            example_before=_snippet(sql),
             example_after=(
-                "SELECT id, name\n"
-                "FROM customers\n"
-                "WHERE status = 'active'\n"
-                "  AND name LIKE 'A%';"
+                "-- İç sorguyu düzleştirin, koşulları WHERE'e taşıyın:\n"
+                "SELECT sutun1, sutun2\n"
+                "FROM tablo\n"
+                "WHERE kosul1 = 'deger'\n"
+                "  AND kosul2 LIKE 'A%';"
             ),
             score_impact=2,
         ))
