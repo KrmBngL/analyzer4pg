@@ -291,6 +291,189 @@ async function analyze() {
   } catch(e) { showError(e.message); }
   finally { document.getElementById('loading').style.display = 'none'; }
 }
+
+// ---- Render helpers ----
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function badge(cls, text) {
+  return `<span class="badge ${cls}" style="font-size:.72rem">${esc(text)}</span>`;
+}
+
+function card(title, countBadge, innerHtml, badgeCls='bg-secondary') {
+  const id = 'card-' + Math.random().toString(36).slice(2);
+  return `<div class="res-card">
+    <div class="res-card-header" onclick="toggleCard('${id}')">
+      <span style="font-weight:700;font-size:.9rem">${title}</span>
+      ${countBadge !== null ? `<span class="badge-count ${badgeCls}">${countBadge}</span>` : ''}
+      <span style="margin-left:${countBadge!==null?'0':'auto'};color:#94a3b8" id="${id}-arrow">▼</span>
+    </div>
+    <div class="res-card-body open" id="${id}">${innerHtml}</div>
+  </div>`;
+}
+
+function toggleCard(id) {
+  const body = document.getElementById(id);
+  const arrow = document.getElementById(id + '-arrow');
+  body.classList.toggle('open');
+  arrow.textContent = body.classList.contains('open') ? '▼' : '▶';
+}
+
+// ---- Plan tree ----
+function nodeClass(n, rootCost) {
+  if (n.node_type === 'Seq Scan') return (n.actual_rows||n.plan_rows) >= 1000 ? 'danger' : 'warning';
+  if (n.node_type.includes('Index')) return 'success';
+  if (rootCost > 0 && n.total_cost / rootCost > 0.5) return 'warning';
+  return 'normal';
+}
+
+function renderNode(n, rootCost) {
+  const cls = nodeClass(n, rootCost);
+  let header = `<div class="pnode-row ${cls}">`;
+  header += `<span class="pnode-type">${esc(n.node_type)}</span>`;
+  if (n.relation_name) header += `<span class="pnode-rel"> → ${esc(n.relation_name)}${n.alias && n.alias !== n.relation_name ? ' ('+esc(n.alias)+')' : ''}</span>`;
+  if (n.index_name) header += `<span class="pnode-idx">[${esc(n.index_name)}]</span>`;
+  header += `<span class="pnode-cost">cost=${n.startup_cost.toFixed(2)}..${n.total_cost.toFixed(2)}</span>`;
+  if (n.actual_total_time !== null) header += `<span class="pnode-time">${n.actual_total_time}ms</span>`;
+  if (n.actual_rows !== null) header += `<span class="pnode-rows">rows=${n.actual_rows.toLocaleString()}</span>`;
+  if (n.row_estimation_ratio !== null && (n.row_estimation_ratio > 10 || n.row_estimation_ratio < 0.1))
+    header += `<span class="pnode-warn">⚠ est=${n.plan_rows.toLocaleString()}</span>`;
+  if (n.sort_method && n.sort_method.toLowerCase().includes('disk'))
+    header += `<span class="pnode-warn">⚠ DISK SORT ${n.sort_space_used}kB</span>`;
+  if (n.hash_batches > 1) header += `<span class="pnode-warn">⚠ HASH SPILL ${n.hash_batches} batches</span>`;
+  header += '</div>';
+
+  let details = '';
+  if (n.filter)     details += `<div class="pnode-detail">Filter: ${esc(n.filter)}</div>`;
+  if (n.index_cond) details += `<div class="pnode-detail">Index Cond: ${esc(n.index_cond)}</div>`;
+  if (n.hash_cond)  details += `<div class="pnode-detail">Hash Cond: ${esc(n.hash_cond)}</div>`;
+  if (n.sort_key)   details += `<div class="pnode-detail">Sort Key: ${esc(n.sort_key.join(', '))}</div>`;
+
+  const children = n.children.map(c => `<div class="pnode">${renderNode(c, rootCost)}</div>`).join('');
+  return header + details + children;
+}
+
+// ---- Findings ----
+function renderFindings(findings) {
+  if (!findings.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Plan analizi sorun tespit etmedi.</div>';
+  return findings.map(f => `
+    <div class="finding finding-${f.level}">
+      <div class="finding-title">${badge('lvl-'+f.level, f.level)} ${esc(f.title)}
+        ${f.relation_name ? `<span style="font-size:.78rem;color:#94a3b8"> → ${esc(f.node_type)} on ${esc(f.relation_name)}</span>` : ''}
+      </div>
+      <div class="finding-desc">${esc(f.description)}</div>
+      <div class="finding-rec">💡 ${esc(f.recommendation)}</div>
+    </div>`).join('');
+}
+
+// ---- Index recommendations ----
+function renderIndexRecs(recs, unused) {
+  let html = '';
+  if (!recs.length && !unused.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Mevcut indexler yeterli görünüyor.</div>';
+
+  recs.forEach((r,i) => {
+    const rid = 'ddl-'+i;
+    html += `<div class="idx-rec">
+      <div class="idx-rec-header">
+        ${badge('pri-'+r.priority, r.priority)}
+        <strong>${esc(r.schema)}.${esc(r.table)}</strong>
+        <span style="color:#2563eb;font-size:.82rem">(${r.columns.map(esc).join(', ')})</span>
+        ${r.is_partial ? badge('bg-info text-dark','PARTIAL') : ''}
+        <span style="margin-left:auto;font-size:.75rem;color:#64748b">${esc(r.estimated_improvement)}</span>
+      </div>
+      <div style="font-size:.8rem;color:#475569;margin-bottom:6px">${esc(r.reason)}</div>
+      <div style="font-size:.78rem;color:#7c3aed;margin-bottom:8px">📈 ${esc(r.impact)}</div>
+      <div class="ddl-block" id="${rid}">${esc(r.ddl)}<button class="copy-btn" onclick="copyDDL('${rid}')">Kopyala</button></div>
+    </div>`;
+  });
+
+  if (unused.length) {
+    html += `<div style="font-weight:700;font-size:.85rem;margin:12px 0 8px;color:#d97706">⚠ Kullanılmayan Indexler (${unused.length})</div>
+    <table class="unused-table"><thead><tr><th>Index</th><th>Tablo</th><th>Boyut</th><th>DROP DDL</th></tr></thead><tbody>`;
+    unused.forEach(u => {
+      html += `<tr><td>${esc(u.index_name)}</td><td>${esc(u.schema)}.${esc(u.table)}</td><td>${esc(u.index_size)}</td>
+        <td style="color:#ef4444">DROP INDEX CONCURRENTLY ${esc(u.index_name)};</td></tr>`;
+    });
+    html += '</tbody></table>';
+  }
+  return html;
+}
+
+// ---- Query recommendations ----
+function renderQueryRecs(recs) {
+  if (!recs.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Sorguda belirgin anti-pattern tespit edilmedi.</div>';
+  const catStyle = { ANTIPATTERN: '#7f1d1d', REWRITE: '#1e3a5f', STYLE: '#14532d' };
+  const catBg    = { ANTIPATTERN: '#fee2e2', REWRITE: '#dbeafe', STYLE: '#dcfce7' };
+  return recs.map(r => `
+    <div class="qrec">
+      <div class="qrec-header" style="background:${catBg[r.category]||'#f1f5f9'};color:${catStyle[r.category]||'#334155'}">
+        ${badge('pri-'+r.priority, r.priority)}
+        <span style="background:${catBg[r.category]||'#f1f5f9'};color:${catStyle[r.category]};font-size:.72rem;font-weight:700;padding:1px 7px;border-radius:10px;border:1px solid currentColor">${r.category}</span>
+        ${esc(r.title)}
+      </div>
+      <div class="qrec-body">${esc(r.description)}</div>
+      ${r.example_before ? `<div class="qrec-label">MEVCUT</div><div class="qrec-code">${esc(r.example_before)}</div>` : ''}
+      ${r.example_after  ? `<div class="qrec-label">ÖNERİLEN</div><div class="qrec-code">${esc(r.example_after)}</div>` : ''}
+    </div>`).join('');
+}
+
+// ---- Copy DDL ----
+function copyDDL(id) {
+  const text = document.getElementById(id).textContent.replace('Kopyala','').trim();
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector(`#${id} .copy-btn`);
+    btn.textContent = '✓ Kopyalandı'; setTimeout(() => btn.textContent = 'Kopyala', 2000);
+  });
+}
+
+// ---- Main render ----
+function renderResults(d) {
+  const rootCost = d.plan_tree.total_cost || 1;
+  const scoreColor = d.score >= 75 ? 'fill-good' : d.score >= 50 ? 'fill-mid' : 'fill-bad';
+  const gradeDesc = {A:'Mükemmel',B:'İyi',C:'Orta — iyileştirme önerilir',D:'Zayıf',F:'Kritik'}[d.grade] || '';
+
+  const timingHtml = d.has_actual
+    ? `<span class="timing-pill">Planlama: ${d.planning_time.toFixed(3)}ms</span>
+       <span class="timing-pill">Çalışma: ${d.execution_time.toFixed(3)}ms</span>
+       <span class="timing-pill" style="background:#dbeafe;color:#1d4ed8;font-weight:700">Toplam: ${(d.planning_time+d.execution_time).toFixed(3)}ms</span>`
+    : `<span class="timing-pill">EXPLAIN only (sorgu çalıştırılmadı)</span>`;
+
+  const scoreHtml = `<div id="score-card">
+    <div class="grade-badge grade-${d.grade}">${d.grade}</div>
+    <div class="score-bar-wrap">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span style="font-weight:700;font-size:.9rem">Performans Skoru: <span style="font-size:1.1rem">${d.score}/100</span></span>
+        <span style="font-size:.82rem;color:#64748b">${gradeDesc}</span>
+      </div>
+      <div class="score-bar-track"><div class="score-bar-fill ${scoreColor}" style="width:${d.score}%"></div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:4px">${timingHtml}</div>
+  </div>`;
+
+  const fCount = d.findings.filter(f=>f.level==='CRITICAL').length;
+  const wCount = d.findings.filter(f=>f.level==='WARNING').length;
+  const findBadge = fCount ? `<span class="badge-count" style="background:#fee2e2;color:#991b1b">${d.findings.length}</span>`
+                           : wCount ? `<span class="badge-count" style="background:#fef3c7;color:#92400e">${d.findings.length}</span>`
+                           : `<span class="badge-count" style="background:#dcfce7;color:#166534">${d.findings.length}</span>`;
+
+  const idxBadge = d.index_recommendations.length
+    ? `<span class="badge-count" style="background:#dbeafe;color:#1d4ed8">${d.index_recommendations.length}</span>` : null;
+  const qBadge = d.query_recommendations.length
+    ? `<span class="badge-count" style="background:#fef3c7;color:#92400e">${d.query_recommendations.length}</span>` : null;
+
+  const html = scoreHtml
+    + card('📋 Execution Plan', null, `<div class="plan-tree">${renderNode(d.plan_tree, rootCost)}</div>`)
+    + card(`⚠ Plan Bulguları`, findBadge, renderFindings(d.findings))
+    + card(`📌 Index Önerileri`, idxBadge, renderIndexRecs(d.index_recommendations, d.unused_indexes))
+    + card(`✏ Sorgu Önerileri`, qBadge, renderQueryRecs(d.query_recommendations));
+
+  document.getElementById('results-placeholder').style.display = 'none';
+  const rc = document.getElementById('results-content');
+  rc.style.display = 'block';
+  rc.innerHTML = html;
+}
 </script>
 </body>
 </html>
