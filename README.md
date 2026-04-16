@@ -34,7 +34,7 @@ cd analyzer4pg
 chmod +x install.sh
 ./install.sh
 ```
-**** HATA ALIRSAN Issues -> Pip version hatası #2  ye bak ****
+### HATA ALIRSAN Issues -> Pip version hatası #2  ye bak ****
 
 ### Windows
 
