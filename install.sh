@@ -43,20 +43,46 @@ info "Python bulundu: $PY_VERSION ($PYTHON)"
 # ---- pip kontrolü ----
 if ! "$PYTHON" -m pip --version &>/dev/null; then
     warn "pip bulunamadı, kuruluyor..."
-    if command -v apt-get &>/dev/null; then
+
+    # Önce ensurepip dene (dnf/apt gerekmez, Python'a gömülüdür)
+    if "$PYTHON" -m ensurepip --upgrade &>/dev/null 2>&1; then
+        info "pip ensurepip ile kuruldu."
+    elif command -v apt-get &>/dev/null; then
         sudo apt-get install -y python3-pip
     elif command -v dnf &>/dev/null; then
-        sudo dnf install -y python3-pip
-    else
-        "$PYTHON" -c "
-import urllib.request, tempfile, os, subprocess
-url='https://bootstrap.pypa.io/get-pip.py'
-tmp=tempfile.mktemp(suffix='.py')
+        # Bozuk/eski repolar varsa devre dışı bırakarak kur (pgdg13 gibi)
+        sudo dnf install -y python3-pip \
+            --disablerepo='pgdg*' \
+            --skip-broken 2>/dev/null \
+        || {
+            warn "dnf ile pip kurulamadı, get-pip.py deneniyor..."
+            "$PYTHON" -m ensurepip --upgrade 2>/dev/null \
+            || "$PYTHON" - <<'GETPIP'
+import urllib.request, tempfile, os, subprocess, sys
+url = 'https://bootstrap.pypa.io/get-pip.py'
+tmp = tempfile.mktemp(suffix='.py')
+print(f"get-pip.py indiriliyor: {url}")
 urllib.request.urlretrieve(url, tmp)
-subprocess.check_call(['$PYTHON', tmp])
+subprocess.check_call([sys.executable, tmp, '--quiet'])
 os.remove(tmp)
-"
+GETPIP
+        }
+    else
+        "$PYTHON" - <<'GETPIP'
+import urllib.request, tempfile, os, subprocess, sys
+url = 'https://bootstrap.pypa.io/get-pip.py'
+tmp = tempfile.mktemp(suffix='.py')
+print(f"get-pip.py indiriliyor: {url}")
+urllib.request.urlretrieve(url, tmp)
+subprocess.check_call([sys.executable, tmp, '--quiet'])
+os.remove(tmp)
+GETPIP
     fi
+fi
+
+# Son kontrol
+if ! "$PYTHON" -m pip --version &>/dev/null; then
+    error "pip kurulamadı. Manuel kurulum:\n  $PYTHON -m ensurepip --upgrade\n  veya: curl -sS https://bootstrap.pypa.io/get-pip.py | $PYTHON"
 fi
 
 info "pip sürümü: $($PYTHON -m pip --version)"
