@@ -158,8 +158,8 @@ class IndexAdvisor:
                 existing_indexes[key] = db_conn.fetch_existing_indexes(schema, table)
                 table_stats[key] = db_conn.fetch_table_stats(schema, table)
 
-            # Unused index detection
-            for row in db_conn.fetch_unused_indexes():
+            # Unused index detection — only for tables present in this query
+            for row in db_conn.fetch_unused_indexes(tables=tables):
                 unused_warnings.append(UnusedIndexWarning(
                     schema=row["schemaname"],
                     table=row["table_name"],

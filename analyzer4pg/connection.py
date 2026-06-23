@@ -164,9 +164,18 @@ class DatabaseConnection:
             cur.execute(sql, (schema, table))
             return [dict(row) for row in cur.fetchall()]
 
-    def fetch_unused_indexes(self) -> list:
-        """Fetch indexes with zero scans (potential candidates for removal)."""
-        sql = """
+    def fetch_unused_indexes(self, tables: list = None) -> list:
+        """Fetch indexes with zero scans. If tables=[(schema,table),...], filter to those tables only."""
+        params: list = []
+        table_filter = ""
+        if tables:
+            clauses = []
+            for schema, table in tables:
+                clauses.append("(schemaname = %s AND relname = %s)")
+                params.extend([schema, table])
+            table_filter = " AND (" + " OR ".join(clauses) + ")"
+
+        sql = f"""
             SELECT
                 schemaname,
                 relname AS table_name,
@@ -180,12 +189,31 @@ class DatabaseConnection:
                   SELECT conindid FROM pg_constraint
                   WHERE contype IN ('p', 'u')
               )
+              {table_filter}
             ORDER BY pg_relation_size(indexrelid) DESC
             LIMIT 20
         """
         with self._conn.cursor() as cur:
-            cur.execute(sql)
+            cur.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
+
+    def fetch_schemas(self) -> list:
+        """Return user-visible schemas (excludes system schemas)."""
+        sql = """
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+              AND schema_name NOT LIKE 'pg_%'
+            ORDER BY schema_name
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            return [row[0] for row in cur.fetchall()]
+
+    def set_search_path(self, schema: str) -> None:
+        """Set search_path so unqualified table names resolve to the given schema."""
+        with self._conn.cursor() as cur:
+            cur.execute("SET search_path TO %s, public", (schema,))
 
     def get_current_database(self) -> str:
         with self._conn.cursor() as cur:

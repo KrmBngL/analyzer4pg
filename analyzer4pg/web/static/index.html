@@ -169,6 +169,13 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
 
     <div id="conn-info" style="font-size:.75rem;color:#64748b;margin-top:12px;line-height:1.6;display:none"></div>
 
+    <div id="schema-section" style="display:none;margin-top:10px">
+      <label>Şema</label>
+      <select id="c-schema" onchange="onSchemaChange()">
+        <option value="">-- Tüm şemalar (public) --</option>
+      </select>
+    </div>
+
     <div style="margin-top:20px;border-top:1px solid #334155;padding-top:14px;">
       <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin-bottom:8px;font-weight:700">Seçenekler</div>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
@@ -226,6 +233,7 @@ function connParams() {
     user: document.getElementById('c-user').value,
     password: document.getElementById('c-pass').value,
     sslmode: document.getElementById('c-ssl').value,
+    schema: document.getElementById('c-schema').value,
   };
 }
 
@@ -238,9 +246,10 @@ function setStatus(ok, text) {
 async function testConnection() {
   setStatus(null, '⏳ Bağlanıyor...');
   try {
+    const params = connParams();
     const r = await fetch('/api/test-connection', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(connParams())
+      body: JSON.stringify(params)
     });
     const d = await r.json();
     if (d.success) {
@@ -248,11 +257,37 @@ async function testConnection() {
       const info = document.getElementById('conn-info');
       info.style.display = 'block';
       info.innerHTML = d.server_version.replace(/^PostgreSQL /, '<b>PG:</b> ').split(' on ')[0];
+      await loadSchemas(params);
     } else {
       setStatus(false, '✗ Hata');
       showError(d.error);
     }
   } catch(e) { setStatus(false, '✗ Hata'); showError(e.message); }
+}
+
+async function loadSchemas(params) {
+  try {
+    const r = await fetch('/api/schemas', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(params)
+    });
+    const d = await r.json();
+    if (d.success && d.schemas.length) {
+      const sel = document.getElementById('c-schema');
+      sel.innerHTML = '<option value="">-- Tüm şemalar (public) --</option>';
+      d.schemas.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s; opt.textContent = s;
+        sel.appendChild(opt);
+      });
+      document.getElementById('schema-section').style.display = 'block';
+    }
+  } catch(e) { /* şema dropdown isteğe bağlı */ }
+}
+
+function onSchemaChange() {
+  const schema = document.getElementById('c-schema').value;
+  document.getElementById('c-schema').style.borderColor = schema ? 'var(--primary)' : '';
 }
 
 function showError(msg) {

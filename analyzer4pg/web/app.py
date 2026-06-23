@@ -36,6 +36,9 @@ def _make_db(data: dict) -> DatabaseConnection:
     )
     db = DatabaseConnection(cfg)
     db.connect()
+    schema = (data.get("schema") or "").strip()
+    if schema:
+        db.set_search_path(schema)
     return db
 
 
@@ -85,6 +88,18 @@ def _node_to_dict(node) -> dict:
 @app.route("/")
 def index():
     return send_from_directory(str(STATIC_DIR), "index.html")
+
+
+@app.route("/api/schemas", methods=["POST"])
+def get_schemas():
+    data = request.get_json(force=True) or {}
+    try:
+        db = _make_db(data)
+        schemas = db.fetch_schemas()
+        db.close()
+        return jsonify({"success": True, "schemas": schemas})
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
 
 
 @app.route("/api/test-connection", methods=["POST"])

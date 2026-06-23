@@ -93,16 +93,30 @@ if "!CHOICE!"=="1" (
     exit /b 1
 )
 
+REM ---- PATH güncelleme (kullanıcı kurulumu için) ----
+if "!INSTALL_TYPE!"=="user" (
+    for /f "tokens=*" %%S in ('!PYTHON! -c "import site, os; print(os.path.join(site.getusersitepackages(),'..','..','Scripts').replace('/',os.sep))" 2^>^&1') do set USER_SCRIPTS=%%S
+    if not "!USER_SCRIPTS!"=="" (
+        echo [BILGI] Python Scripts klasoru PATH'e ekleniyor: !USER_SCRIPTS!
+        setx PATH "!PATH!;!USER_SCRIPTS!" >nul 2>&1
+        if errorlevel 1 (
+            echo [UYARI] PATH otomatik eklenemedi. Manuel ekleyin: !USER_SCRIPTS!
+        ) else (
+            echo [BASARI] PATH guncellendi. Yeni terminal acin.
+        )
+    )
+)
+
 REM ---- Kurulum kontrolü ----
 echo.
 analyzer4pg --version >nul 2>&1
 if errorlevel 1 (
-    echo [UYARI] analyzer4pg komutu PATH'te bulunamadi.
+    echo [UYARI] analyzer4pg komutu bu terminalde bulunamadi.
+    echo [BILGI] Yeni bir cmd/PowerShell penceresi acin ve tekrar deneyin.
     echo.
-    echo Cozum secenekleri:
-    echo   1. Yeni bir cmd/PowerShell penceresi acin (PATH yenilenir)
-    echo   2. Kullanici Scripts klasorunu PATH'e ekleyin:
-    !PYTHON! -c "import site; print('  ' + site.getusersitepackages().replace('site-packages','Scripts'))"
+    echo Alternatif - Dogrudan Python ile calistirin:
+    echo   !PYTHON! -m analyzer4pg web
+    echo   !PYTHON! -m analyzer4pg analyze -H localhost -d mydb -U postgres -q "SELECT ..."
     echo.
 ) else (
     for /f "tokens=*" %%V in ('analyzer4pg --version 2^>^&1') do (
@@ -123,14 +137,22 @@ echo.
 echo   Dosyadan SQL okuma:
 echo   analyzer4pg analyze -H localhost -d mydb -U postgres -f sorgu.sql
 echo.
+echo   Web arayuzu (tarayici otomatik acilir):
+echo   analyzer4pg web
+echo   veya: !PYTHON! -m analyzer4pg web
+echo.
 echo   Interaktif mod:
 echo   analyzer4pg repl -H localhost -d mydb -U postgres
 echo.
-echo   EXPLAIN ANALYZE olmadan (sorgu calistirilmaz):
-echo   analyzer4pg analyze --no-analyze -H localhost -d mydb -U postgres ^
-echo       -q "SELECT * FROM orders"
+echo   Tek sorgu analizi:
+echo   analyzer4pg analyze -H localhost -d mydb -U postgres ^
+echo       -q "SELECT * FROM mytable WHERE id = 1"
 echo.
 echo Kurulum tamamlandi!
+echo.
+echo NOT: Eger 'analyzer4pg' komutu taninmiyorsa:
+echo   1. Bu terminali kapatin ve yeni bir terminal acin
+echo   2. Veya: !PYTHON! -m analyzer4pg web
 pause
 exit /b 0
 
