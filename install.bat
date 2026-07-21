@@ -95,7 +95,16 @@ if "!CHOICE!"=="1" (
 
 REM ---- PATH güncelleme (kullanıcı kurulumu için) ----
 if "!INSTALL_TYPE!"=="user" (
-    for /f "tokens=*" %%S in ('!PYTHON! -c "import site, os; print(os.path.join(site.getusersitepackages(),'..','..','Scripts').replace('/',os.sep))" 2^>^&1') do set USER_SCRIPTS=%%S
+    REM Dogru formul: {userbase}\PythonXY\Scripts (site-packages ile KARDES klasor,
+    REM iki degil TEK seviye yukarida - onceki surumdeki hata buradaydi)
+    for /f "tokens=*" %%S in ('!PYTHON! -c "import site, sys, os; print(os.path.join(site.getuserbase(), 'Python%%d%%d' %% sys.version_info[:2], 'Scripts'))" 2^>^&1') do set USER_SCRIPTS=%%S
+
+    if not exist "!USER_SCRIPTS!\analyzer4pg.exe" (
+        echo [BILGI] Beklenen konumda bulunamadi, taraniyor: !USER_SCRIPTS!
+        for /f "delims=" %%F in ('dir /s /b "%APPDATA%\Python\analyzer4pg.exe" 2^>nul') do set USER_SCRIPTS=%%~dpF
+        if defined USER_SCRIPTS if "!USER_SCRIPTS:~-1!"=="\" set USER_SCRIPTS=!USER_SCRIPTS:~0,-1!
+    )
+
     if not "!USER_SCRIPTS!"=="" (
         echo [BILGI] Python Scripts klasoru PATH'e ekleniyor: !USER_SCRIPTS!
         setx PATH "!PATH!;!USER_SCRIPTS!" >nul 2>&1
@@ -104,6 +113,13 @@ if "!INSTALL_TYPE!"=="user" (
         ) else (
             echo [BASARI] PATH guncellendi. Yeni terminal acin.
         )
+        if not exist "!USER_SCRIPTS!\analyzer4pg.exe" (
+            echo [UYARI] analyzer4pg.exe bu klasorde bulunamadi, PATH yine de eklendi.
+            echo         Sorun devam ederse: !PYTHON! -m analyzer4pg web
+        )
+    ) else (
+        echo [UYARI] Scripts klasoru tespit edilemedi. Dogrudan calistirin:
+        echo         !PYTHON! -m analyzer4pg web
     )
 )
 
