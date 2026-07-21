@@ -135,7 +135,7 @@ def analyze():
     try:
         plan_result  = PlanAnalyzer().analyze(db, sql, use_analyze=use_analyze)
         index_recs, unused = IndexAdvisor().advise(plan_result, db_conn=db)
-        query_recs   = QueryAdvisor().advise(sql)
+        query_recs   = QueryAdvisor().advise(sql, db_conn=db)
 
         # Recalculate final score including query advisor deductions
         query_deduction = sum(r.score_impact for r in query_recs)
@@ -199,6 +199,7 @@ def analyze():
                     "example_before": r.example_before,
                     "example_after": r.example_after,
                     "score_impact": r.score_impact,
+                    "rewritten_sql": r.rewritten_sql,
                 }
                 for r in query_recs
             ],

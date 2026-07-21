@@ -197,6 +197,24 @@ class DatabaseConnection:
             cur.execute(sql, params)
             return [dict(row) for row in cur.fetchall()]
 
+    def fetch_columns(self, table_ref: str) -> list:
+        """
+        Return ordered column names for a table, resolved via the current
+        search_path (to_regclass honours it whether table_ref is bare or
+        schema-qualified). Used for SELECT * rewrite suggestions.
+        """
+        sql = """
+            SELECT a.attname
+            FROM pg_attribute a
+            WHERE a.attrelid = to_regclass(%s)
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(sql, (table_ref,))
+            return [row[0] for row in cur.fetchall()]
+
     def fetch_schemas(self) -> list:
         """Return user-visible schemas (excludes system schemas)."""
         sql = """

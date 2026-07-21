@@ -101,6 +101,11 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
 .qrec-body { padding:10px 14px; background:#f8fafc; font-size:.82rem; color:#475569; white-space:pre-line; }
 .qrec-code { background:#1e293b; color:#e2e8f0; font-family:monospace; font-size:.78rem; padding:8px 12px; white-space:pre; overflow-x:auto; }
 .qrec-label { font-size:.72rem; font-weight:700; color:#94a3b8; padding:6px 14px 2px; background:#f8fafc; }
+.qrec-gain { font-size:.78rem; font-weight:700; color:#059669; padding:4px 14px 0; background:#f8fafc; }
+.diff-add { background:#22c55e; color:#052e16; border-radius:3px; padding:0 2px; font-weight:700; }
+.qrec-apply-row { padding:8px 14px 12px; background:#f8fafc; }
+.qrec-apply-btn { background:var(--primary); color:#fff; border:none; border-radius:6px; padding:5px 14px; font-size:.78rem; font-weight:700; cursor:pointer; }
+.qrec-apply-btn:hover { opacity:.9; }
 
 /* Priority badges */
 .pri-HIGH   { background:#fee2e2; color:#991b1b; }
@@ -308,6 +313,8 @@ function clearResults() {
 }
 
 // ---- Analyze ----
+let lastAnalyzedSql = '';
+
 async function analyze() {
   const sql = editor.getValue().trim();
   if (!sql) { showError('SQL sorgusu boş'); return; }
@@ -321,6 +328,7 @@ async function analyze() {
     });
     const d = await r.json();
     if (d.error) { showError(d.error); return; }
+    lastAnalyzedSql = sql;
     renderResults(d);
     setStatus(true, '✓ ' + connParams().dbname);
   } catch(e) { showError(e.message); }
@@ -436,12 +444,69 @@ function renderIndexRecs(recs, unused) {
   return html;
 }
 
+// ---- Word-level diff (LCS-based) for highlighting rewritten queries ----
+function tokenizeSql(s) {
+  return s.match(/\s+|[^\s]+/g) || [];
+}
+
+function diffTokens(a, b) {
+  const n = a.length, m = b.length;
+  const dp = Array.from({length: n + 1}, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+    }
+  }
+  let i = 0, j = 0;
+  const ops = [];
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { ops.push(['eq', a[i]]); i++; j++; }
+    else if (dp[i+1][j] >= dp[i][j+1]) { ops.push(['del', a[i]]); i++; }
+    else { ops.push(['add', b[j]]); j++; }
+  }
+  while (i < n) { ops.push(['del', a[i]]); i++; }
+  while (j < m) { ops.push(['add', b[j]]); j++; }
+  return ops;
+}
+
+// Renders the corrected (after) query in full, highlighting the tokens that
+// changed relative to the original. Deleted tokens are omitted — the goal is
+// to hand back a complete, ready-to-run query, not a literal diff view.
+function renderRewriteHtml(before, after) {
+  const a = tokenizeSql(before), b = tokenizeSql(after);
+  if (a.length * b.length > 4_000_000) {
+    return esc(after); // too large for O(n*m) diff — show plain
+  }
+  const ops = diffTokens(a, b);
+  let html = '';
+  ops.forEach(([type, tok]) => {
+    if (type === 'del') return;
+    if (type === 'add' && tok.trim() !== '') html += `<mark class="diff-add">${esc(tok)}</mark>`;
+    else html += esc(tok);
+  });
+  return html;
+}
+
 // ---- Query recommendations ----
-function renderQueryRecs(recs) {
+function renderQueryRecs(recs, formattedSql) {
   if (!recs.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Sorguda belirgin anti-pattern tespit edilmedi.</div>';
   const catStyle = { ANTIPATTERN: '#7f1d1d', REWRITE: '#1e3a5f', STYLE: '#14532d' };
   const catBg    = { ANTIPATTERN: '#fee2e2', REWRITE: '#dbeafe', STYLE: '#dcfce7' };
-  return recs.map(r => `
+  window.__qrecRewrites = {};
+  return recs.map((r, i) => {
+    let rewriteHtml = '';
+    if (r.rewritten_sql) {
+      const rid = 'qrw-' + i;
+      window.__qrecRewrites[rid] = r.rewritten_sql;
+      rewriteHtml = `
+        <div class="qrec-label">DÜZELTİLMİŞ SORGU (tam)</div>
+        <div class="qrec-code">${renderRewriteHtml(formattedSql || '', r.rewritten_sql)}</div>
+        <div class="qrec-gain">📈 Tahmini performans kazancı: +${r.score_impact} puan</div>
+        <div class="qrec-apply-row">
+          <button class="qrec-apply-btn" onclick="loadRewrittenQuery('${rid}')">Bu sorguyu editöre yükle</button>
+        </div>`;
+    }
+    return `
     <div class="qrec">
       <div class="qrec-header" style="background:${catBg[r.category]||'#f1f5f9'};color:${catStyle[r.category]||'#334155'}">
         ${badge('pri-'+r.priority, r.priority)}
@@ -451,7 +516,18 @@ function renderQueryRecs(recs) {
       <div class="qrec-body">${esc(r.description)}</div>
       ${r.example_before ? `<div class="qrec-label">MEVCUT</div><div class="qrec-code">${esc(r.example_before)}</div>` : ''}
       ${r.example_after  ? `<div class="qrec-label">ÖNERİLEN</div><div class="qrec-code">${esc(r.example_after)}</div>` : ''}
-    </div>`).join('');
+      ${rewriteHtml}
+    </div>`;
+  }).join('');
+}
+
+// ---- Apply rewritten query to editor ----
+function loadRewrittenQuery(id) {
+  const sql = (window.__qrecRewrites || {})[id];
+  if (sql == null) return;
+  editor.setValue(sql);
+  document.getElementById('editor-area').scrollIntoView({behavior: 'smooth', block: 'start'});
+  editor.focus();
 }
 
 // ---- Copy DDL ----
@@ -502,7 +578,7 @@ function renderResults(d) {
     + card('📋 Execution Plan', null, `<div class="plan-tree">${renderNode(d.plan_tree, rootCost)}</div>`)
     + card(`⚠ Plan Bulguları`, findBadge, renderFindings(d.findings))
     + card(`📌 Index Önerileri`, idxBadge, renderIndexRecs(d.index_recommendations, d.unused_indexes))
-    + card(`✏ Sorgu Önerileri`, qBadge, renderQueryRecs(d.query_recommendations));
+    + card(`✏ Sorgu Önerileri`, qBadge, renderQueryRecs(d.query_recommendations, lastAnalyzedSql));
 
   document.getElementById('results-placeholder').style.display = 'none';
   const rc = document.getElementById('results-content');

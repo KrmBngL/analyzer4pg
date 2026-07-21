@@ -27,6 +27,7 @@ class QueryRecommendation:
     example_before: Optional[str]
     example_after: Optional[str]
     score_impact: int
+    rewritten_sql: Optional[str] = None  # full corrected query, only when a safe mechanical rewrite exists
 
 
 # ---------------------------------------------------------------------------
@@ -64,15 +65,117 @@ def _extract_fragment(sql: str, pattern: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Mechanical full-query rewrites
+#
+# These operate on the actual (non-normalised) SQL text and return a
+# complete, corrected query — or None if a safe, unambiguous rewrite isn't
+# possible. Only patterns where the fix is a pure, meaning-preserving text
+# substitution are handled here; anti-patterns that require architectural
+# decisions (index choice, join key, pagination strategy, ...) are left to
+# the guidance text instead of a fabricated "corrected" query.
+# ---------------------------------------------------------------------------
+
+def _rewrite_select_star(sql: str, table_ref: str, db_conn) -> Optional[str]:
+    if db_conn is None:
+        return None
+    try:
+        columns = db_conn.fetch_columns(table_ref)
+    except Exception:
+        return None
+    if not columns:
+        return None
+    m = re.search(r"\bSELECT\s+(\w+\.)?\*", sql, re.IGNORECASE)
+    if not m:
+        return None
+    prefix = m.group(1) or ""
+    col_list = ", ".join(f"{prefix}{c}" for c in columns)
+    return sql[:m.start()] + f"SELECT {col_list}" + sql[m.end():]
+
+
+def _rewrite_implicit_cast(sql: str) -> Optional[str]:
+    m = re.search(
+        r"\b(\w*(?:_id|_code|_num)|status_id|type_id)\s*=\s*'(\d+)'",
+        sql,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    col, val = m.group(1), m.group(2)
+    return sql[:m.start()] + f"{col} = {val}" + sql[m.end():]
+
+
+def _rewrite_or_chain(sql: str, col: str) -> Optional[str]:
+    pattern = rf"\b{re.escape(col)}\s*=\s*(?:'[^']*'|\d+)(?:\s+OR\s+{re.escape(col)}\s*=\s*(?:'[^']*'|\d+))+"
+    m = re.search(pattern, sql, re.IGNORECASE)
+    if not m:
+        return None
+    values = re.findall(rf"{re.escape(col)}\s*=\s*('[^']*'|\d+)", m.group(0), re.IGNORECASE)
+    if len(values) < 3:
+        return None
+    replacement = f"{col} IN ({', '.join(values)})"
+    return sql[:m.start()] + replacement + sql[m.end():]
+
+
+def _rewrite_union_all(sql: str) -> Optional[str]:
+    if not re.search(r"\bUNION\b(?!\s+ALL)", sql, re.IGNORECASE):
+        return None
+    return re.sub(r"\bUNION\b(?!\s+ALL)", "UNION ALL", sql, flags=re.IGNORECASE)
+
+
+def _rewrite_upper_lower_eq(sql: str) -> Optional[str]:
+    m = re.search(r"\b(?:UPPER|LOWER)\s*\(\s*([\w\.]+)\s*\)\s*=\s*'([^']*)'", sql, re.IGNORECASE)
+    if not m:
+        return None
+    col, val = m.group(1), m.group(2)
+    if any(ch in val for ch in "%_"):
+        return None  # would change ILIKE wildcard semantics
+    return sql[:m.start()] + f"{col} ILIKE '{val}'" + sql[m.end():]
+
+
+def _rewrite_extract_year(sql: str) -> Optional[str]:
+    m = re.search(r"\bEXTRACT\s*\(\s*YEAR\s+FROM\s+([\w\.]+)\s*\)\s*=\s*(\d{4})\b", sql, re.IGNORECASE)
+    if not m:
+        return None
+    col, year = m.group(1), int(m.group(2))
+    replacement = f"{col} >= '{year}-01-01' AND {col} < '{year + 1}-01-01'"
+    return sql[:m.start()] + replacement + sql[m.end():]
+
+
+def _rewrite_having_to_where(sql: str) -> Optional[str]:
+    m_having = re.search(
+        r"\bHAVING\s+(.*?)(?=\bORDER\s+BY\b|\bLIMIT\b|;|$)", sql, re.IGNORECASE | re.DOTALL
+    )
+    if not m_having:
+        return None
+    having_cond = m_having.group(1).strip()
+    if not having_cond:
+        return None
+    sql_no_having = (sql[:m_having.start()] + sql[m_having.end():]).rstrip()
+
+    m_group = re.search(r"\bGROUP\s+BY\b", sql_no_having, re.IGNORECASE)
+    if not m_group:
+        return None
+    pre_group = sql_no_having[:m_group.start()]
+    has_where = re.search(r"\bWHERE\b", pre_group, re.IGNORECASE)
+
+    if has_where:
+        insertion = f"\n  AND ({having_cond})\n"
+    else:
+        insertion = f"\nWHERE {having_cond}\n"
+    return pre_group.rstrip() + insertion + sql_no_having[m_group.start():]
+
+
+# ---------------------------------------------------------------------------
 # Individual detectors
 # ---------------------------------------------------------------------------
 
-def _check_select_star(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_select_star(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     if re.search(r"\bSELECT\s+(\w+\.)?\*", normalised):
         # Extract table name from the actual query for a targeted suggestion
-        m = re.search(r"\bFROM\s+(\w+)", sql, re.IGNORECASE)
+        m = re.search(r"\bFROM\s+([\w\.]+)", sql, re.IGNORECASE)
         tablo = m.group(1) if m else "tablo_adi"
+        rewritten = _rewrite_select_star(sql, tablo, db_conn) if m else None
         recs.append(QueryRecommendation(
             priority="LOW",
             category="ANTIPATTERN",
@@ -87,11 +190,12 @@ def _check_select_star(sql: str, normalised: str) -> List[QueryRecommendation]:
             example_before=_snippet(sql),
             example_after=f"-- SELECT * yerine ihtiyaç duyduğunuz sütunları listeleyin:\nSELECT id, ad, tarih, ... FROM {tablo} WHERE ...;",
             score_impact=3,
+            rewritten_sql=rewritten,
         ))
     return recs
 
 
-def _check_leading_wildcard_like(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_leading_wildcard_like(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # LIKE '%...' or ILIKE '%...'
     if re.search(r"\b(?:I?LIKE)\s+'%\w", normalised):
@@ -119,7 +223,7 @@ def _check_leading_wildcard_like(sql: str, normalised: str) -> List[QueryRecomme
     return recs
 
 
-def _check_function_on_column(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_function_on_column(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # WHERE func(col) = value  ->  non-SARGable
     # Common patterns: UPPER(), LOWER(), TRIM(), TO_CHAR(), DATE(), EXTRACT()
@@ -129,23 +233,27 @@ def _check_function_on_column(sql: str, normalised: str) -> List[QueryRecommenda
          "Fonksiyon içeren koşullarda index kullanılamaz.",
          "WHERE UPPER(email) = 'USER@EXAMPLE.COM'",
          "WHERE email = 'user@example.com'  -- Verileri küçük harfle sakla\n"
-         "-- ya da fonksiyonel index: CREATE INDEX idx_email_lower ON users(LOWER(email));"),
+         "-- ya da fonksiyonel index: CREATE INDEX idx_email_lower ON users(LOWER(email));",
+         _rewrite_upper_lower_eq),
 
         (r"\bWHERE\b.*\b(TO_CHAR|TO_DATE|TO_TIMESTAMP|DATE_TRUNC)\s*\(",
          "Tarih Fonksiyonu",
          "Tarih fonksiyonları koşulda kullanıldığında index atlanır.",
          "WHERE TO_CHAR(created_at, 'YYYY-MM') = '2024-01'",
-         "WHERE created_at >= '2024-01-01' AND created_at < '2024-02-01'"),
+         "WHERE created_at >= '2024-01-01' AND created_at < '2024-02-01'",
+         None),
 
         (r"\bWHERE\b.*\bEXTRACT\s*\(",
          "EXTRACT Fonksiyonu",
          "EXTRACT() ile karşılaştırma index'i devre dışı bırakır.",
          "WHERE EXTRACT(YEAR FROM order_date) = 2024",
-         "WHERE order_date >= '2024-01-01' AND order_date < '2025-01-01'"),
+         "WHERE order_date >= '2024-01-01' AND order_date < '2025-01-01'",
+         _rewrite_extract_year),
     ]
 
-    for pattern, name, desc, before, after in patterns:
+    for pattern, name, desc, before, after, rewrite_fn in patterns:
         if re.search(pattern, normalised):
+            rewritten = rewrite_fn(sql) if rewrite_fn else None
             recs.append(QueryRecommendation(
                 priority="HIGH",
                 category="ANTIPATTERN",
@@ -158,11 +266,12 @@ def _check_function_on_column(sql: str, normalised: str) -> List[QueryRecommenda
                 example_before=before,
                 example_after=after,
                 score_impact=10,
+                rewritten_sql=rewritten,
             ))
     return recs
 
 
-def _check_not_in_subquery(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_not_in_subquery(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     if re.search(r"\bNOT\s+IN\s*\(\s*SELECT\b", normalised):
         recs.append(QueryRecommendation(
@@ -193,7 +302,7 @@ def _check_not_in_subquery(sql: str, normalised: str) -> List[QueryRecommendatio
     return recs
 
 
-def _check_implicit_type_cast(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_implicit_type_cast(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # Integer column compared with string literal: col = '123' (common in WHERE clauses)
     # This is heuristic - we look for numeric-named cols compared to string literals
@@ -210,11 +319,12 @@ def _check_implicit_type_cast(sql: str, normalised: str) -> List[QueryRecommenda
             example_before=_extract_fragment(sql, r"\bWHERE\b.{0,120}"),
             example_after="-- Sayısal sütunlar için sayısal literal kullanın:\nWHERE musteri_id = 12345   -- tırnak işareti olmadan",
             score_impact=5,
+            rewritten_sql=_rewrite_implicit_cast(sql),
         ))
     return recs
 
 
-def _check_or_instead_of_in(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_or_instead_of_in(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # col = X OR col = Y OR col = Z  ->  col IN (X, Y, Z)
     match = re.search(
@@ -222,7 +332,10 @@ def _check_or_instead_of_in(sql: str, normalised: str) -> List[QueryRecommendati
         normalised,
     )
     if match:
-        col = match.group(1)
+        col_upper = match.group(1)
+        # Recover the column's original casing from the actual SQL text
+        col_match = re.search(rf"\b{re.escape(col_upper)}\b", sql, re.IGNORECASE)
+        col = col_match.group(0) if col_match else col_upper
         recs.append(QueryRecommendation(
             priority="LOW",
             category="STYLE",
@@ -234,11 +347,12 @@ def _check_or_instead_of_in(sql: str, normalised: str) -> List[QueryRecommendati
             example_before=_extract_fragment(sql, rf"\b{col}\s*=\s*(?:'[^']*'|\d+)\s+OR\s+{col}\s*=.{{0,80}}"),
             example_after=f"WHERE {col} IN (deger1, deger2, deger3)",
             score_impact=2,
+            rewritten_sql=_rewrite_or_chain(sql, col),
         ))
     return recs
 
 
-def _check_having_vs_where(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_having_vs_where(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # HAVING without GROUP BY, or HAVING on a non-aggregate column
     if re.search(r"\bHAVING\b", normalised):
@@ -267,11 +381,12 @@ def _check_having_vs_where(sql: str, normalised: str) -> List[QueryRecommendatio
                         "GROUP BY sutun;"
                     ),
                     score_impact=5,
+                    rewritten_sql=_rewrite_having_to_where(sql),
                 ))
     return recs
 
 
-def _check_distinct_abuse(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_distinct_abuse(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     if re.search(r"\bSELECT\s+DISTINCT\b", normalised):
         recs.append(QueryRecommendation(
@@ -299,7 +414,7 @@ def _check_distinct_abuse(sql: str, normalised: str) -> List[QueryRecommendation
     return recs
 
 
-def _check_union_vs_union_all(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_union_vs_union_all(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # UNION without ALL
     if re.search(r"\bUNION\b(?!\s+ALL)", normalised):
@@ -313,16 +428,14 @@ def _check_union_vs_union_all(sql: str, normalised: str) -> List[QueryRecommenda
                 "(örn. farklı tablolar), UNION ALL çok daha hızlıdır."
             ),
             example_before=_extract_fragment(sql, r"\bUNION\b(?!\s+ALL).{0,200}"),
-            example_after=(
-                "-- Tekrarlar mümkün değilse UNION ALL kullanın:\n"
-                + re.sub(r"\bUNION\b(?!\s+ALL)", "UNION ALL", sql, flags=re.IGNORECASE)[:300]
-            ),
+            example_after="-- Tekrarlar mümkün değilse UNION ALL kullanın:\nUNION ALL",
             score_impact=5,
+            rewritten_sql=_rewrite_union_all(sql),
         ))
     return recs
 
 
-def _check_correlated_subquery(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_correlated_subquery(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # SELECT (SELECT ... FROM t2 WHERE t2.col = t1.col) FROM t1
     # Heuristic: subquery in SELECT list
@@ -348,7 +461,7 @@ def _check_correlated_subquery(sql: str, normalised: str) -> List[QueryRecommend
     return recs
 
 
-def _check_count_column(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_count_column(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # COUNT(column) vs COUNT(*) - often misunderstood
     if re.search(r"\bCOUNT\s*\(\s*(?![\*1])\w+\s*\)", normalised):
@@ -374,7 +487,7 @@ def _check_count_column(sql: str, normalised: str) -> List[QueryRecommendation]:
     return recs
 
 
-def _check_offset_large(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_offset_large(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     match = re.search(r"\bOFFSET\s+(\d+)\b", normalised)
     if match:
@@ -403,7 +516,7 @@ def _check_offset_large(sql: str, normalised: str) -> List[QueryRecommendation]:
     return recs
 
 
-def _check_order_by_rand(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_order_by_rand(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     if re.search(r"\bORDER\s+BY\s+RANDOM\s*\(\)", normalised):
         recs.append(QueryRecommendation(
@@ -430,7 +543,7 @@ def _check_order_by_rand(sql: str, normalised: str) -> List[QueryRecommendation]
     return recs
 
 
-def _check_missing_join_condition(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_missing_join_condition(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # Detect implicit cross join: FROM t1, t2 without a WHERE join condition
     # Simple heuristic: multiple tables in FROM without JOIN keyword
@@ -460,7 +573,7 @@ def _check_missing_join_condition(sql: str, normalised: str) -> List[QueryRecomm
     return recs
 
 
-def _check_unnecessary_subquery(sql: str, normalised: str) -> List[QueryRecommendation]:
+def _check_unnecessary_subquery(sql: str, normalised: str, db_conn=None) -> List[QueryRecommendation]:
     recs = []
     # SELECT ... FROM (SELECT ... FROM t) sub  where inner has no GROUP BY/DISTINCT
     if re.search(r"\bFROM\s*\(\s*SELECT\b(?:(?!\bGROUP\b|\bDISTINCT\b|\bLIMIT\b|\bUNION\b).)*\)\s+\w+\b", normalised):
@@ -511,15 +624,19 @@ class QueryAdvisor:
         _check_unnecessary_subquery,
     ]
 
-    def advise(self, sql: str) -> List[QueryRecommendation]:
-        """Run all detectors against the given SQL string."""
+    def advise(self, sql: str, db_conn=None) -> List[QueryRecommendation]:
+        """
+        Run all detectors against the given SQL string.
+        db_conn (optional): an open DatabaseConnection, used only to resolve
+        real column names for the SELECT * rewrite suggestion.
+        """
         cleaned = _strip_comments(sql)
         normalised = _normalise(cleaned)
 
         recommendations: List[QueryRecommendation] = []
         for detector in self._DETECTORS:
             try:
-                recommendations.extend(detector(cleaned, normalised))
+                recommendations.extend(detector(cleaned, normalised, db_conn))
             except Exception:
                 pass  # Never crash the full analysis due to a single detector
 
