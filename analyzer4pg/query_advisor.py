@@ -165,6 +165,155 @@ def _rewrite_having_to_where(sql: str) -> Optional[str]:
     return pre_group.rstrip() + insertion + sql_no_having[m_group.start():]
 
 
+def _find_matching_paren(sql: str, open_idx: int) -> int:
+    """Given the index of an opening '(', return the index of its matching ')'."""
+    depth = 0
+    in_string = False
+    i = open_idx
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            if in_string and i + 1 < n and sql[i + 1] == "'":
+                i += 2
+                continue
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    return -1
+
+
+def _split_top_level(text: str, keyword: str) -> List[str]:
+    """Split text on a keyword (e.g. 'AND'), ignoring occurrences inside
+    nested parentheses or string literals."""
+    parts = []
+    depth = 0
+    in_string = False
+    start = 0
+    i = 0
+    n = len(text)
+    kw_len = len(keyword)
+    while i < n:
+        ch = text[i]
+        if ch == "'":
+            if in_string and i + 1 < n and text[i + 1] == "'":
+                i += 2
+                continue
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif depth == 0 and text[i:i + kw_len].upper() == keyword.upper():
+                before = text[i - 1] if i > 0 else " "
+                after = text[i + kw_len] if i + kw_len < n else " "
+                if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                    parts.append(text[start:i])
+                    i += kw_len
+                    start = i
+                    continue
+        i += 1
+    parts.append(text[start:])
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _rewrite_correlated_subquery(sql: str) -> Optional[str]:
+    """
+    Converts scalar correlated subqueries in the SELECT list into LEFT JOINs,
+    when each one has the simple shape:
+        (SELECT <col> FROM <table> <alias> WHERE <filters> AND <alias>.<col> = <outer>.<col>)
+    A LEFT JOIN preserves the original NULL-if-no-match semantics exactly.
+    Only subqueries matching this simple shape are converted; anything more
+    complex (multiple joins, aggregates, non-equality correlation, ...) is
+    left untouched. Returns None if nothing could be safely converted.
+    """
+    m_select = re.match(r"\s*SELECT\b", sql, re.IGNORECASE)
+    if not m_select:
+        return None
+
+    # Locate the top-level FROM that ends the outer SELECT list (paren-depth 0)
+    depth = 0
+    in_string = False
+    from_idx = -1
+    i = m_select.end()
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "'":
+            if in_string and i + 1 < n and sql[i + 1] == "'":
+                i += 2
+                continue
+            in_string = not in_string
+        elif not in_string:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif depth == 0 and re.match(r"\bFROM\b", sql[i:], re.IGNORECASE):
+                from_idx = i
+                break
+        i += 1
+    if from_idx == -1:
+        return None
+
+    replacements = []
+    joins = []
+    pos = m_select.end()
+    while True:
+        open_idx = sql.find("(", pos, from_idx)
+        if open_idx == -1:
+            break
+        if not re.match(r"\(\s*SELECT\b", sql[open_idx:], re.IGNORECASE):
+            pos = open_idx + 1
+            continue
+        close_idx = _find_matching_paren(sql, open_idx)
+        if close_idx == -1 or close_idx >= from_idx:
+            pos = open_idx + 1
+            continue
+
+        inner = sql[open_idx + 1:close_idx]
+        m_sub = re.match(
+            r"\s*SELECT\s+([\w\.]+)\s+FROM\s+([\w\.]+)\s+(\w+)\s+WHERE\s+(.+)$",
+            inner, re.IGNORECASE | re.DOTALL,
+        )
+        if m_sub:
+            select_expr, sub_table, sub_alias, where_cond = m_sub.groups()
+            conditions = _split_top_level(where_cond, "AND")
+            sub_prefix = sub_alias.lower() + "."
+            correlation_found = False
+            for cond in conditions:
+                m_eq = re.match(r"^([\w\.]+)\s*=\s*([\w\.]+)$", cond)
+                if m_eq and (m_eq.group(1).lower().startswith(sub_prefix) or m_eq.group(2).lower().startswith(sub_prefix)):
+                    correlation_found = True
+                    break
+            if correlation_found and conditions:
+                replacements.append((open_idx, close_idx, select_expr))
+                joins.append(f"LEFT JOIN {sub_table} {sub_alias} ON {' AND '.join(conditions)}")
+        pos = close_idx + 1
+
+    if not joins:
+        return None
+
+    result = sql
+    for start, end, replacement in sorted(replacements, key=lambda r: r[0], reverse=True):
+        result = result[:start] + replacement + result[end + 1:]
+
+    m_tail = re.search(r"\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b", result, re.IGNORECASE)
+    join_block = "\n".join(joins)
+    if m_tail:
+        result = result[:m_tail.start()] + "\n" + join_block + "\n" + result[m_tail.start():]
+    else:
+        result = result.rstrip().rstrip(";") + "\n" + join_block + ";"
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Individual detectors
 # ---------------------------------------------------------------------------
@@ -457,6 +606,7 @@ def _check_correlated_subquery(sql: str, normalised: str, db_conn=None) -> List[
                 "JOIN alt_tablo t2 ON t2.id = t1.alt_id;"
             ),
             score_impact=10,
+            rewritten_sql=_rewrite_correlated_subquery(sql),
         ))
     return recs
 
