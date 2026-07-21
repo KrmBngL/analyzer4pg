@@ -230,9 +230,18 @@ def _rewrite_correlated_subquery(sql: str) -> Optional[str]:
     when each one has the simple shape:
         (SELECT <col> FROM <table> <alias> WHERE <filters> AND <alias>.<col> = <outer>.<col>)
     A LEFT JOIN preserves the original NULL-if-no-match semantics exactly.
-    Only subqueries matching this simple shape are converted; anything more
-    complex (multiple joins, aggregates, non-equality correlation, ...) is
-    left untouched. Returns None if nothing could be safely converted.
+
+    When several subqueries hit the *same* lookup table with a single equality
+    filter each (the classic EAV/attribute-value pattern), they're folded into
+    one shared CTE that pre-filters the lookup table down to the relevant rows
+    before joining — this is what keeps the plan cheap on a large lookup table,
+    instead of scanning it once per subquery.
+
+    Only the simple shape above is converted; anything more complex (nested
+    joins, aggregates, non-equality correlation, ...) is left untouched.
+    Returns None if nothing could be safely converted. The caller is expected
+    to verify the result is actually cheaper via EXPLAIN before presenting it
+    — this function only guarantees a *correct*, not necessarily faster, query.
     """
     m_select = re.match(r"\s*SELECT\b", sql, re.IGNORECASE)
     if not m_select:
@@ -263,8 +272,7 @@ def _rewrite_correlated_subquery(sql: str) -> Optional[str]:
     if from_idx == -1:
         return None
 
-    replacements = []
-    joins = []
+    matches = []
     pos = m_select.end()
     while True:
         open_idx = sql.find("(", pos, from_idx)
@@ -287,23 +295,95 @@ def _rewrite_correlated_subquery(sql: str) -> Optional[str]:
             select_expr, sub_table, sub_alias, where_cond = m_sub.groups()
             conditions = _split_top_level(where_cond, "AND")
             sub_prefix = sub_alias.lower() + "."
-            correlation_found = False
+
+            correlation_col = None
+            outer_ref = None
+            const_filters = []     # [(col_name, literal), ...] — simple "alias.col = literal" filters
+            extra_conditions = []  # anything we can't classify — kept verbatim in the ON clause
+
             for cond in conditions:
                 m_eq = re.match(r"^([\w\.]+)\s*=\s*([\w\.]+)$", cond)
-                if m_eq and (m_eq.group(1).lower().startswith(sub_prefix) or m_eq.group(2).lower().startswith(sub_prefix)):
-                    correlation_found = True
-                    break
-            if correlation_found and conditions:
-                replacements.append((open_idx, close_idx, select_expr))
-                joins.append(f"LEFT JOIN {sub_table} {sub_alias} ON {' AND '.join(conditions)}")
+                if correlation_col is None and m_eq:
+                    left, right = m_eq.groups()
+                    if left.lower().startswith(sub_prefix):
+                        correlation_col, outer_ref = left.split(".", 1)[1], right
+                        continue
+                    if right.lower().startswith(sub_prefix):
+                        correlation_col, outer_ref = right.split(".", 1)[1], left
+                        continue
+                m_lit = re.match(rf"^{re.escape(sub_alias)}\.(\w+)\s*=\s*('[^']*'|\d+)$", cond, re.IGNORECASE)
+                if m_lit:
+                    const_filters.append((m_lit.group(1), m_lit.group(2)))
+                else:
+                    extra_conditions.append(cond)
+
+            if correlation_col and outer_ref:
+                matches.append({
+                    "open": open_idx, "close": close_idx,
+                    "select_expr": select_expr, "select_col": select_expr.split(".")[-1],
+                    "sub_table": sub_table, "sub_alias": sub_alias,
+                    "correlation_col": correlation_col, "outer_ref": outer_ref,
+                    "const_filters": const_filters, "extra_conditions": extra_conditions,
+                    "all_conditions": conditions,
+                })
         pos = close_idx + 1
 
-    if not joins:
+    if not matches:
         return None
 
+    groups: dict = {}
+    for m in matches:
+        groups.setdefault(m["sub_table"].lower(), []).append(m)
+
+    cte_defs = []
+    joins = []
+    cte_seq = 0
+
+    for group in groups.values():
+        homogeneous = (
+            len(group) > 1
+            and all(len(m["const_filters"]) == 1 and not m["extra_conditions"] for m in group)
+            and len({m["const_filters"][0][0] for m in group}) == 1
+            and len({m["correlation_col"] for m in group}) == 1
+            and len({m["select_col"] for m in group}) == 1
+        )
+        if homogeneous:
+            filter_col = group[0]["const_filters"][0][0]
+            corr_col = group[0]["correlation_col"]
+            select_col = group[0]["select_col"]
+            sub_table = group[0]["sub_table"]
+            values, seen = [], set()
+            for m in group:
+                v = m["const_filters"][0][1]
+                if v not in seen:
+                    seen.add(v)
+                    values.append(v)
+            cte_seq += 1
+            short = re.sub(r"\W+", "_", sub_table.split(".")[-1]).strip("_") or "t"
+            cte_name = f"cte_{short}_{cte_seq}"
+            cte_defs.append(
+                f"{cte_name} AS (\n"
+                f"    SELECT {corr_col}, {filter_col}, {select_col}\n"
+                f"    FROM {sub_table}\n"
+                f"    WHERE {filter_col} IN ({', '.join(values)})\n"
+                f")"
+            )
+            for m in group:
+                filt_val = m["const_filters"][0][1]
+                joins.append(
+                    f"LEFT JOIN {cte_name} {m['sub_alias']} "
+                    f"ON {m['sub_alias']}.{corr_col} = {m['outer_ref']} "
+                    f"AND {m['sub_alias']}.{filter_col} = {filt_val}"
+                )
+                m["replacement"] = f"{m['sub_alias']}.{select_col}"
+        else:
+            for m in group:
+                joins.append(f"LEFT JOIN {m['sub_table']} {m['sub_alias']} ON {' AND '.join(m['all_conditions'])}")
+                m["replacement"] = m["select_expr"]
+
     result = sql
-    for start, end, replacement in sorted(replacements, key=lambda r: r[0], reverse=True):
-        result = result[:start] + replacement + result[end + 1:]
+    for m in sorted(matches, key=lambda x: x["open"], reverse=True):
+        result = result[:m["open"]] + m["replacement"] + result[m["close"] + 1:]
 
     m_tail = re.search(r"\bWHERE\b|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b", result, re.IGNORECASE)
     join_block = "\n".join(joins)
@@ -311,6 +391,10 @@ def _rewrite_correlated_subquery(sql: str) -> Optional[str]:
         result = result[:m_tail.start()] + "\n" + join_block + "\n" + result[m_tail.start():]
     else:
         result = result.rstrip().rstrip(";") + "\n" + join_block + ";"
+
+    if cte_defs:
+        result = "WITH " + ",\n".join(cte_defs) + "\n" + result
+
     return result
 
 

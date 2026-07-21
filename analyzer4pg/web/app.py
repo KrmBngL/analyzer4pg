@@ -42,6 +42,30 @@ def _make_db(data: dict) -> DatabaseConnection:
     return db
 
 
+def _verify_rewrite(db: DatabaseConnection, original_cost: float, rewritten_sql: str):
+    """
+    A textual rewrite can be syntactically correct and still be a worse plan —
+    it depends entirely on the target database's indexes, table sizes and
+    statistics, which no static rule can know in advance. So before a rewrite
+    is ever shown, ask the real planner: EXPLAIN both queries and only keep
+    the rewrite if it's actually cheaper. Also doubles as a safety net against
+    a rewrite that doesn't even parse against the live schema.
+    Returns a cost-comparison dict, or None if the rewrite should be discarded.
+    """
+    try:
+        alt_plan = db.explain_query(rewritten_sql, use_analyze=False)
+        alt_cost = alt_plan.get("Plan", {}).get("Total Cost")
+    except Exception:
+        return None
+    if alt_cost is None or original_cost <= 0 or alt_cost >= original_cost * 0.98:
+        return None
+    return {
+        "estimated_cost_before": round(original_cost, 2),
+        "estimated_cost_after": round(alt_cost, 2),
+        "cost_improvement_pct": round((original_cost - alt_cost) / original_cost * 100, 1),
+    }
+
+
 def _node_to_dict(node) -> dict:
     """Recursively convert a PlanNode to a JSON-serialisable dict."""
     row_est_ratio = None
@@ -137,6 +161,18 @@ def analyze():
         index_recs, unused = IndexAdvisor().advise(plan_result, db_conn=db)
         query_recs   = QueryAdvisor().advise(sql, db_conn=db)
 
+        # A rewritten_sql is only ever shown if EXPLAIN confirms it's actually
+        # cheaper on this database — see _verify_rewrite for why that matters.
+        rewrite_costs = {}
+        for i, r in enumerate(query_recs):
+            if not r.rewritten_sql:
+                continue
+            info = _verify_rewrite(db, plan_result.root_node.total_cost, r.rewritten_sql)
+            if info is None:
+                r.rewritten_sql = None
+            else:
+                rewrite_costs[i] = info
+
         # Recalculate final score including query advisor deductions
         query_deduction = sum(r.score_impact for r in query_recs)
         final_score = max(0, plan_result.score - query_deduction)
@@ -200,8 +236,11 @@ def analyze():
                     "example_after": r.example_after,
                     "score_impact": r.score_impact,
                     "rewritten_sql": r.rewritten_sql,
+                    "estimated_cost_before": rewrite_costs.get(i, {}).get("estimated_cost_before"),
+                    "estimated_cost_after": rewrite_costs.get(i, {}).get("estimated_cost_after"),
+                    "cost_improvement_pct": rewrite_costs.get(i, {}).get("cost_improvement_pct"),
                 }
-                for r in query_recs
+                for i, r in enumerate(query_recs)
             ],
         })
 

@@ -498,10 +498,13 @@ function renderQueryRecs(recs, formattedSql) {
     if (r.rewritten_sql) {
       const rid = 'qrw-' + i;
       window.__qrecRewrites[rid] = r.rewritten_sql;
+      const gainText = (r.estimated_cost_before != null && r.estimated_cost_after != null)
+        ? `📈 EXPLAIN ile doğrulandı: maliyet ${r.estimated_cost_before.toLocaleString('tr-TR')} → ${r.estimated_cost_after.toLocaleString('tr-TR')} (%${r.cost_improvement_pct} azalma)`
+        : '📈 Tahmini iyileştirme';
       rewriteHtml = `
-        <div class="qrec-label">DÜZELTİLMİŞ SORGU (tam)</div>
+        <div class="qrec-label">DÜZELTİLMİŞ SORGU (tam, veritabanınızda EXPLAIN ile doğrulanmıştır)</div>
         <div class="qrec-code">${renderRewriteHtml(formattedSql || '', r.rewritten_sql)}</div>
-        <div class="qrec-gain">📈 Tahmini performans kazancı: +${r.score_impact} puan</div>
+        <div class="qrec-gain">${gainText}</div>
         <div class="qrec-apply-row">
           <button class="qrec-apply-btn" onclick="loadRewrittenQuery('${rid}')">Bu sorguyu editöre yükle</button>
         </div>`;
