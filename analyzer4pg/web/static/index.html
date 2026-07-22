@@ -106,6 +106,10 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
 .qrec-apply-row { padding:8px 14px 12px; background:#f8fafc; }
 .qrec-apply-btn { background:var(--primary); color:#fff; border:none; border-radius:6px; padding:5px 14px; font-size:.78rem; font-weight:700; cursor:pointer; }
 .qrec-apply-btn:hover { opacity:.9; }
+.qrec-newplan { background:#f8fafc; padding:0 14px 12px; border-top:1px dashed #e2e8f0; }
+.qrec-newplan summary { cursor:pointer; font-size:.78rem; font-weight:700; color:#2563eb; padding:8px 0; user-select:none; }
+.qrec-newplan[open] summary { margin-bottom:6px; }
+.qrec-newplan .plan-tree { background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:8px 10px; margin-bottom:8px; }
 
 /* Priority badges */
 .pri-HIGH   { background:#fee2e2; color:#991b1b; }
@@ -188,6 +192,11 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
         <span style="font-size:.82rem">EXPLAIN ANALYZE kullan</span>
       </label>
       <div style="font-size:.72rem;color:#475569;margin-top:4px">Kapalıysa sorgu çalıştırılmaz, sadece plan hesaplanır.</div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+        <input type="checkbox" id="opt-ai" style="width:auto;margin:0">
+        <span style="font-size:.82rem">🤖 AI destekli düzeltme/öneri</span>
+      </label>
+      <div style="font-size:.72rem;color:#475569;margin-top:4px">Sözdizimi hatalarını düzeltmeyi ve ek sorgu önerileri üretmeyi dener (ANTHROPIC_API_KEY gerekir). Her öneri veritabanında gerçek EXPLAIN ile doğrulanmadan gösterilmez.</div>
     </div>
   </div>
 
@@ -321,13 +330,21 @@ async function analyze() {
   document.getElementById('loading').style.display = 'flex';
   document.getElementById('error-msg').style.display = 'none';
   try {
-    const body = { ...connParams(), sql, use_analyze: document.getElementById('opt-analyze').checked };
+    const body = {
+      ...connParams(), sql,
+      use_analyze: document.getElementById('opt-analyze').checked,
+      use_ai: document.getElementById('opt-ai').checked,
+    };
     const r = await fetch('/api/analyze', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify(body)
     });
     const d = await r.json();
-    if (d.error) { showError(d.error); return; }
+    if (d.error) {
+      const extra = d.ai_unavailable || d.ai_note;
+      showError(extra ? `${d.error} (${extra})` : d.error);
+      return;
+    }
     lastAnalyzedSql = sql;
     renderResults(d);
     setStatus(true, '✓ ' + connParams().dbname);
@@ -503,13 +520,30 @@ function renderQueryRecs(recs, formattedSql) {
         : r.verified_with === 'cost'
         ? `📈 EXPLAIN ile doğrulandı: planlayıcı maliyeti ${r.cost_before.toLocaleString('tr-TR')} → ${r.cost_after.toLocaleString('tr-TR')} (%${r.improvement_pct} azalma)`
         : '';
+      let newPlanHtml = '';
+      if (r.new_plan) {
+        const np = r.new_plan;
+        const npRootCost = np.plan_tree.total_cost || 1;
+        const npTiming = np.has_actual
+          ? `<span class="timing-pill">Planlama: ${np.planning_time.toFixed(3)}ms</span>
+             <span class="timing-pill">Çalışma: ${np.execution_time.toFixed(3)}ms</span>`
+          : `<span class="timing-pill">EXPLAIN only (sorgu çalıştırılmadı)</span>`;
+        newPlanHtml = `
+          <details class="qrec-newplan">
+            <summary>🔍 Düzeltilmiş sorgunun güncel planını göster (Skor: ${np.score}/100 — ${np.grade})</summary>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${npTiming}</div>
+            <div class="plan-tree">${renderNode(np.plan_tree, npRootCost)}</div>
+            ${renderFindings(np.findings)}
+          </details>`;
+      }
       rewriteHtml = `
         <div class="qrec-label">DÜZELTİLMİŞ SORGU (tam, veritabanınızda EXPLAIN ile doğrulanmıştır)</div>
         <div class="qrec-code">${renderRewriteHtml(formattedSql || '', r.rewritten_sql)}</div>
         <div class="qrec-gain">${gainText}</div>
         <div class="qrec-apply-row">
           <button class="qrec-apply-btn" onclick="loadRewrittenQuery('${rid}')">Bu sorguyu editöre yükle</button>
-        </div>`;
+        </div>
+        ${newPlanHtml}`;
     }
     return `
     <div class="qrec">
@@ -529,6 +563,74 @@ function renderQueryRecs(recs, formattedSql) {
 // ---- Apply rewritten query to editor ----
 function loadRewrittenQuery(id) {
   const sql = (window.__qrecRewrites || {})[id];
+  if (sql == null) return;
+  editor.setValue(sql);
+  document.getElementById('editor-area').scrollIntoView({behavior: 'smooth', block: 'start'});
+  editor.focus();
+}
+
+// ---- AI syntax-fix banner ----
+function renderAiFixBanner(fix) {
+  if (!fix) return '';
+  return `
+    <div class="res-card" style="border:2px solid #f59e0b;background:#fffbeb">
+      <div style="padding:12px 16px;font-weight:700;color:#92400e;font-size:.88rem">
+        ⚠ Orijinal sorguda sözdizimi hatası vardı — 🤖 AI tarafından düzeltildi ve EXPLAIN ile doğrulandı
+      </div>
+      <div style="padding:0 16px 12px">
+        <div class="qrec-label" style="padding-left:0">DÜZELTİLMİŞ SORGU</div>
+        <div class="qrec-code">${renderRewriteHtml(fix.original_sql || '', fix.corrected_sql)}</div>
+        <div style="font-size:.8rem;color:#92400e;margin-top:6px">${esc(fix.explanation)}</div>
+        <div style="font-size:.72rem;color:#78350f;margin-top:6px">
+          Not: Bu düzeltme veritabanında geçerli bir plan ürettiği için doğrulandı;
+          orijinal sorguyla aynı sonucu döndürdüğü garanti değildir.
+        </div>
+      </div>
+    </div>`;
+}
+
+// ---- AI general rewrite recommendation ----
+function renderAiRecommendation(rec, formattedSql) {
+  if (!rec) return '';
+  const gainText = rec.verified_with === 'analyze'
+    ? `📈 EXPLAIN ANALYZE ile doğrulandı: gerçek süre ${rec.before.toLocaleString('tr-TR')}ms → ${rec.after.toLocaleString('tr-TR')}ms (%${rec.improvement_pct} azalma)`
+    : `📈 EXPLAIN ile doğrulandı: planlayıcı maliyeti ${rec.before.toLocaleString('tr-TR')} → ${rec.after.toLocaleString('tr-TR')} (%${rec.improvement_pct} azalma)`;
+
+  let newPlanHtml = '';
+  if (rec.new_plan) {
+    const np = rec.new_plan;
+    const npRootCost = np.plan_tree.total_cost || 1;
+    const npTiming = np.has_actual
+      ? `<span class="timing-pill">Planlama: ${np.planning_time.toFixed(3)}ms</span>
+         <span class="timing-pill">Çalışma: ${np.execution_time.toFixed(3)}ms</span>`
+      : `<span class="timing-pill">EXPLAIN only (sorgu çalıştırılmadı)</span>`;
+    newPlanHtml = `
+      <details class="qrec-newplan">
+        <summary>🔍 Önerilen sorgunun planını göster (Skor: ${np.score}/100 — ${np.grade})</summary>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">${npTiming}</div>
+        <div class="plan-tree">${renderNode(np.plan_tree, npRootCost)}</div>
+        ${renderFindings(np.findings)}
+      </details>`;
+  }
+
+  window.__aiRecSql = rec.rewritten_sql;
+  return `
+    <div class="qrec-body">${esc(rec.explanation)}</div>
+    <div class="qrec-label">ÖNERİLEN SORGU (veritabanında EXPLAIN ile doğrulanmıştır)</div>
+    <div class="qrec-code">${renderRewriteHtml(formattedSql || '', rec.rewritten_sql)}</div>
+    <div class="qrec-gain">${gainText}</div>
+    <div class="qrec-apply-row">
+      <button class="qrec-apply-btn" onclick="loadAiRecommendation()">Bu sorguyu editöre yükle</button>
+    </div>
+    ${newPlanHtml}
+    <div style="padding:8px 14px 12px;font-size:.72rem;color:#92400e;background:#f8fafc">
+      ⚠ Bu öneri veritabanında geçerli ve daha ucuz çalıştığı için doğrulandı; orijinal sorguyla
+      AYNI sonuç kümesini döndürdüğü garanti değildir — kullanmadan önce sonuçları karşılaştırın.
+    </div>`;
+}
+
+function loadAiRecommendation() {
+  const sql = window.__aiRecSql;
   if (sql == null) return;
   editor.setValue(sql);
   document.getElementById('editor-area').scrollIntoView({behavior: 'smooth', block: 'start'});
@@ -579,11 +681,13 @@ function renderResults(d) {
   const qBadge = d.query_recommendations.length
     ? `<span class="badge-count" style="background:#fef3c7;color:#92400e">${d.query_recommendations.length}</span>` : null;
 
-  const html = scoreHtml
+  const html = renderAiFixBanner(d.ai_fix)
+    + scoreHtml
     + card('📋 Execution Plan', null, `<div class="plan-tree">${renderNode(d.plan_tree, rootCost)}</div>`)
     + card(`⚠ Plan Bulguları`, findBadge, renderFindings(d.findings))
     + card(`📌 Index Önerileri`, idxBadge, renderIndexRecs(d.index_recommendations, d.unused_indexes))
-    + card(`✏ Sorgu Önerileri`, qBadge, renderQueryRecs(d.query_recommendations, lastAnalyzedSql));
+    + card(`✏ Sorgu Önerileri`, qBadge, renderQueryRecs(d.query_recommendations, lastAnalyzedSql))
+    + (d.ai_recommendation ? card('🤖 AI Sorgu Önerisi (deneysel)', null, renderAiRecommendation(d.ai_recommendation, lastAnalyzedSql)) : '');
 
   document.getElementById('results-placeholder').style.display = 'none';
   const rc = document.getElementById('results-content');

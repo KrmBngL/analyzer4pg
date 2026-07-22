@@ -8,6 +8,20 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+class QuerySyntaxError(RuntimeError):
+    """
+    Raised when PostgreSQL reports SQLSTATE 42601 (syntax_error) for a query,
+    as opposed to other EXPLAIN failures (missing table, permission, etc.).
+    Lets callers offer AI-assisted repair specifically for real syntax
+    mistakes. Subclasses RuntimeError so existing `except RuntimeError`
+    handling keeps working unchanged.
+    """
+
+    def __init__(self, message: str, position: Optional[int] = None):
+        super().__init__(message)
+        self.position = position
+
+
 @dataclass
 class ConnectionConfig:
     host: str = "localhost"
@@ -107,6 +121,20 @@ class DatabaseConnection:
             return result[0] if isinstance(result, list) else result
 
         except psycopg2.Error as e:
+            if e.pgcode == "42601":  # syntax_error
+                position = None
+                stmt_pos = getattr(e.diag, "statement_position", None)
+                if stmt_pos:
+                    try:
+                        # statement_position is 1-indexed into explain_sql
+                        # (the wrapping EXPLAIN clause + the query); translate
+                        # it back to an offset into the user's original query.
+                        prefix_len = len(explain_sql) - len(query_stripped)
+                        pos = int(stmt_pos) - prefix_len
+                        position = pos if pos > 0 else None
+                    except (TypeError, ValueError):
+                        position = None
+                raise QuerySyntaxError(str(e).strip(), position=position) from e
             raise RuntimeError(f"EXPLAIN failed: {e}") from e
 
     def fetch_table_stats(self, schema: str, table: str) -> dict:

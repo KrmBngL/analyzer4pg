@@ -15,10 +15,12 @@ from rich import box
 from rich.panel import Panel
 
 from . import __version__
-from .connection import DatabaseConnection, build_connection_config
+from .connection import DatabaseConnection, build_connection_config, QuerySyntaxError
 from .plan_analyzer import PlanAnalyzer
 from .index_advisor import IndexAdvisor
 from .query_advisor import QueryAdvisor
+from .llm_advisor import LLMAdvisor
+from .rewrite_verify import verify_rewrite
 from .reporter import (
     console,
     print_full_report,
@@ -40,6 +42,8 @@ _connection_options = [
                  help="SSL modu"),
     click.option("--no-analyze",     is_flag=True,        default=False,
                  help="EXPLAIN ANALYZE yerine sadece EXPLAIN çalıştır (sorguyu gerçekten çalıştırmaz)"),
+    click.option("--ai",             "use_ai", is_flag=True, default=False,
+                 help="AI destekli sözdizimi düzeltme ve sorgu önerisi (ANTHROPIC_API_KEY gerekir)"),
 ]
 
 
@@ -78,6 +82,7 @@ def _run_analysis(
     sql: str,
     use_analyze: bool,
     show_sql: bool = True,
+    use_ai: bool = False,
 ) -> None:
     """Core pipeline: EXPLAIN → analyze plan → index advice → query advice → report."""
     analyzer = PlanAnalyzer()
@@ -86,7 +91,13 @@ def _run_analysis(
 
     console.print("[dim]Sorgu analiz ediliyor...[/dim]")
 
-    plan_result = analyzer.analyze(db, sql, use_analyze=use_analyze)
+    try:
+        plan_result = analyzer.analyze(db, sql, use_analyze=use_analyze)
+    except QuerySyntaxError as e:
+        if not use_ai:
+            raise
+        sql, plan_result = _handle_ai_syntax_fix(db, sql, e, use_analyze, analyzer)
+
     index_recs, unused = index_advisor.advise(plan_result, db_conn=db)
     query_recs = query_advisor.advise(sql)
 
@@ -99,6 +110,117 @@ def _run_analysis(
         db_name=db.get_current_database(),
         server_version=db.server_version,
         show_sql=show_sql,
+    )
+
+    if use_ai:
+        _print_ai_rewrite_suggestion(db, sql, plan_result, use_analyze)
+
+
+def _handle_ai_syntax_fix(db, sql, syntax_err, use_analyze, analyzer):
+    """
+    A real PostgreSQL syntax error (SQLSTATE 42601) — the query doesn't even
+    parse, so no rule-based rewrite can help. Ask Claude for a fix, then
+    re-EXPLAIN the corrected query to verify it now actually parses/runs.
+    Re-raises the ORIGINAL error if AI is unavailable or can't produce a
+    verified fix, so exit codes and error reporting stay unchanged for
+    non-AI use.
+    """
+    advisor = LLMAdvisor()
+    reason = advisor.unavailable_reason()
+    if reason:
+        console.print(f"[yellow]AI destekli düzeltme kullanılamıyor:[/yellow] {reason}")
+        raise syntax_err
+
+    console.print("[dim]Sözdizimi hatası tespit edildi, AI destekli düzeltme deneniyor...[/dim]")
+    try:
+        suggestion = advisor.fix_syntax_error(sql, str(syntax_err), db.server_version)
+    except RuntimeError as ai_err:
+        console.print(f"[yellow]AI hatası:[/yellow] {ai_err}")
+        raise syntax_err
+    if suggestion is None:
+        console.print("[yellow]AI güvenilir bir düzeltme öneremedi.[/yellow]")
+        raise syntax_err
+
+    try:
+        plan_result = analyzer.analyze(db, suggestion.corrected_sql, use_analyze=use_analyze)
+    except Exception as fix_err:
+        console.print(f"[yellow]AI'nin önerdiği düzeltme de hata verdi:[/yellow] {fix_err}")
+        console.print(Panel(
+            suggestion.corrected_sql,
+            title="[dim]AI önerisi (doğrulanamadı)[/dim]",
+            box=box.ROUNDED,
+        ))
+        raise syntax_err
+
+    console.print(f"[green]✓ AI düzeltmesi EXPLAIN ile doğrulandı[/green] — {suggestion.explanation}")
+    console.print(Panel(
+        suggestion.corrected_sql,
+        title="[bold cyan]Düzeltilmiş Sorgu[/bold cyan]",
+        box=box.ROUNDED,
+    ))
+    console.print(
+        "[dim]Not: Bu düzeltme veritabanında geçerli bir plan ürettiği için doğrulandı; "
+        "orijinal sorguyla aynı sonucu döndürdüğü garanti değildir.[/dim]"
+    )
+    return suggestion.corrected_sql, plan_result
+
+
+def _print_ai_rewrite_suggestion(db, sql, plan_result, use_analyze) -> None:
+    """
+    Beyond syntax repair, optionally ask Claude for an alternative query
+    structure (e.g. correlated subquery -> CTE) for problems the rule-based
+    query_advisor doesn't already have a mechanical rewrite for. Verified via
+    the same real-EXPLAIN pipeline as rule-based rewrites before it's shown.
+    """
+    advisor = LLMAdvisor()
+    if advisor.unavailable_reason():
+        return
+
+    findings_summary = "\n".join(
+        f"- [{f.level}] {f.title}: {f.description.splitlines()[0]}"
+        for f in plan_result.findings if f.level in ("CRITICAL", "WARNING")
+    )
+    if not findings_summary:
+        return
+
+    plan_summary = f"Kök düğüm: {plan_result.root_node.node_type}, planlayıcı maliyeti {plan_result.root_node.total_cost:.1f}"
+    if plan_result.has_actual:
+        plan_summary += f", gerçek süre {plan_result.execution_time:.1f}ms"
+
+    console.print()
+    console.print("[dim]AI'den alternatif sorgu yapısı isteniyor...[/dim]")
+    try:
+        suggestion = advisor.suggest_rewrite(sql, plan_summary, findings_summary, db.server_version)
+    except RuntimeError as e:
+        console.print(f"[yellow]AI hatası:[/yellow] {e}")
+        return
+    if suggestion is None:
+        return
+
+    verification = verify_rewrite(db, plan_result, suggestion.corrected_sql, use_analyze)
+    if verification is None:
+        return  # not actually cheaper / doesn't verify — don't show unverified guesses
+
+    console.print(Panel(
+        suggestion.corrected_sql,
+        title="[bold magenta]🤖 AI Sorgu Önerisi (deneysel)[/bold magenta]",
+        box=box.ROUNDED,
+    ))
+    console.print(f"[dim]{suggestion.explanation}[/dim]")
+    if verification.verified_with == "analyze":
+        console.print(
+            f"[green]📈 EXPLAIN ANALYZE ile doğrulandı:[/green] gerçek süre "
+            f"{verification.before}ms → {verification.after}ms (%{verification.improvement_pct} azalma)"
+        )
+    else:
+        console.print(
+            f"[green]📈 EXPLAIN ile doğrulandı:[/green] planlayıcı maliyeti "
+            f"{verification.before} → {verification.after} (%{verification.improvement_pct} azalma)"
+        )
+    console.print(
+        "[yellow]⚠ Bu öneri veritabanında geçerli ve daha ucuz çalıştığı için doğrulandı; "
+        "orijinal sorguyla AYNI sonuç kümesini döndürdüğü garanti değildir — kullanmadan önce "
+        "sonuçları karşılaştırın.[/yellow]"
     )
 
 
@@ -129,7 +251,7 @@ def main():
 @add_connection_options
 @click.option("-q", "--query",  default=None, help="Analiz edilecek SQL sorgusu")
 @click.option("-f", "--file",   default=None, type=click.Path(exists=True), help="SQL sorgusu içeren dosya")
-def analyze_cmd(host, port, dbname, user, password, sslmode, no_analyze, query, file):
+def analyze_cmd(host, port, dbname, user, password, sslmode, no_analyze, use_ai, query, file):
     """Tek bir sorguyu analiz et ve rapor üret."""
     # Resolve SQL
     if file:
@@ -155,7 +277,7 @@ def analyze_cmd(host, port, dbname, user, password, sslmode, no_analyze, query, 
         sys.exit(1)
 
     try:
-        _run_analysis(db, sql, use_analyze=not no_analyze)
+        _run_analysis(db, sql, use_analyze=not no_analyze, use_ai=use_ai)
     except RuntimeError as e:
         console.print(f"[red]Analiz hatası:[/red] {e}")
         sys.exit(1)
@@ -165,7 +287,7 @@ def analyze_cmd(host, port, dbname, user, password, sslmode, no_analyze, query, 
 
 @main.command("repl")
 @add_connection_options
-def repl_cmd(host, port, dbname, user, password, sslmode, no_analyze):
+def repl_cmd(host, port, dbname, user, password, sslmode, no_analyze, use_ai):
     """İnteraktif SQL analiz kabuğu (REPL) başlat."""
     try:
         db = _connect(host, port, dbname, user, password, sslmode)
@@ -232,6 +354,16 @@ def repl_cmd(host, port, dbname, user, password, sslmode, no_analyze):
                 console.print("[yellow]ANALYZE kapalı (sadece EXPLAIN).[/yellow]")
                 continue
 
+            if stripped.lower() == "\\ai on":
+                use_ai = True
+                console.print("[green]AI destekli düzeltme açık.[/green]")
+                continue
+
+            if stripped.lower() == "\\ai off":
+                use_ai = False
+                console.print("[yellow]AI destekli düzeltme kapalı.[/yellow]")
+                continue
+
         # --- SQL accumulation ---
         if stripped:
             buffer.append(line)
@@ -246,7 +378,7 @@ def repl_cmd(host, port, dbname, user, password, sslmode, no_analyze):
             if not sql:
                 continue
             try:
-                _run_analysis(db, sql, use_analyze=not no_analyze, show_sql=False)
+                _run_analysis(db, sql, use_analyze=not no_analyze, show_sql=False, use_ai=use_ai)
             except RuntimeError as e:
                 console.print(f"[red]Analiz hatası:[/red] {e}")
             except Exception as e:
@@ -265,7 +397,8 @@ def _print_repl_help() -> None:
         "  [cyan]\\h[/cyan]             — Bu yardım mesajını göster\n"
         "  [cyan]\\c <dbname>[/cyan]    — Başka bir veritabanına bağlan\n"
         "  [cyan]\\clear[/cyan]         — Ekranı temizle\n"
-        "  [cyan]\\analyze on/off[/cyan]— ANALYZE modunu aç/kapat\n\n"
+        "  [cyan]\\analyze on/off[/cyan]— ANALYZE modunu aç/kapat\n"
+        "  [cyan]\\ai on/off[/cyan]     — AI destekli düzeltme/öneri modunu aç/kapat\n\n"
         "[bold]SQL Kullanımı:[/bold]\n"
         "  Sorguyu yazın ve [bold]noktalı virgül (;)[/bold] ile bitirin:\n"
         "  [dim]SELECT * FROM orders WHERE customer_id = 5;[/dim]\n\n"

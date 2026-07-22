@@ -9,10 +9,12 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
 
-from ..connection import DatabaseConnection, build_connection_config
+from ..connection import DatabaseConnection, build_connection_config, QuerySyntaxError
 from ..plan_analyzer import PlanAnalyzer
 from ..index_advisor import IndexAdvisor
 from ..query_advisor import QueryAdvisor, format_sql
+from ..rewrite_verify import verify_rewrite
+from ..llm_advisor import LLMAdvisor
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -43,46 +45,74 @@ def _make_db(data: dict) -> DatabaseConnection:
 
 def _verify_rewrite(db: DatabaseConnection, plan_result, rewritten_sql: str, use_analyze: bool):
     """
-    A textual rewrite can be syntactically correct and still be a worse plan —
-    it depends entirely on the target database's indexes, table sizes and
-    statistics, which no static rule can know in advance. So before a rewrite
-    is ever shown, ask the real database: when the original query was run with
-    EXPLAIN ANALYZE, actually execute the rewrite with EXPLAIN ANALYZE too and
-    compare real elapsed time — not a planner cost guess. Only fall back to
-    planner cost (EXPLAIN without ANALYZE) when the user chose not to execute
-    the original query either. Also doubles as a safety net against a rewrite
-    that doesn't even parse against the live schema.
-    Returns a comparison dict, or None if the rewrite should be discarded.
+    Thin adapter over rewrite_verify.verify_rewrite() that keeps this route's
+    existing JSON field names (time_before_ms/cost_before/...) stable.
     """
-    if use_analyze and plan_result.has_actual:
-        try:
-            alt_plan = db.explain_query(rewritten_sql, use_analyze=True)
-            alt_time = alt_plan.get("Execution Time")
-        except Exception:
-            return None
-        original_time = plan_result.execution_time
-        if alt_time is None or original_time <= 0 or alt_time >= original_time * 0.98:
-            return None
-        return {
-            "verified_with": "analyze",
-            "time_before_ms": round(original_time, 3),
-            "time_after_ms": round(alt_time, 3),
-            "improvement_pct": round((original_time - alt_time) / original_time * 100, 1),
-        }
-
-    try:
-        alt_plan = db.explain_query(rewritten_sql, use_analyze=False)
-        alt_cost = alt_plan.get("Plan", {}).get("Total Cost")
-    except Exception:
+    v = verify_rewrite(db, plan_result, rewritten_sql, use_analyze)
+    if v is None:
         return None
-    original_cost = plan_result.root_node.total_cost
-    if alt_cost is None or original_cost <= 0 or alt_cost >= original_cost * 0.98:
+    info = {
+        "verified_with": v.verified_with,
+        "improvement_pct": v.improvement_pct,
+        "new_plan": _plan_result_to_dict(v.new_plan),
+    }
+    if v.verified_with == "analyze":
+        info["time_before_ms"] = v.before
+        info["time_after_ms"] = v.after
+    else:
+        info["cost_before"] = v.before
+        info["cost_after"] = v.after
+    return info
+
+
+def _summarize_plan(plan_result) -> str:
+    root = plan_result.root_node
+    time_part = f", gerçek süre {plan_result.execution_time:.1f}ms" if plan_result.has_actual else ""
+    return f"Kök düğüm: {root.node_type}, planlayıcı maliyeti {root.total_cost:.1f}{time_part}"
+
+
+def _summarize_findings(findings) -> str:
+    top = [f for f in findings if f.level in ("CRITICAL", "WARNING")][:5]
+    if not top:
+        return ""
+    return "\n".join(
+        f"- [{f.level}] {f.title}: {f.description.splitlines()[0]}" for f in top
+    )
+
+
+def _try_ai_rewrite(db: DatabaseConnection, sql: str, plan_result, use_analyze: bool):
+    """
+    Asks Claude for one alternative query structure (e.g. subquery -> CTE)
+    beyond the fixed set of mechanical rewrites in query_advisor.py, then
+    verifies it the same way as rule-based rewrites: real EXPLAIN (ANALYZE)
+    on this database. Returns None if AI is unavailable, declines, or the
+    suggestion doesn't verify as actually cheaper.
+    """
+    advisor = LLMAdvisor()
+    if advisor.unavailable_reason():
+        return None
+    findings_summary = _summarize_findings(plan_result.findings)
+    if not findings_summary:
+        return None  # nothing worth improving
+    try:
+        suggestion = advisor.suggest_rewrite(
+            sql, _summarize_plan(plan_result), findings_summary, db.server_version
+        )
+    except RuntimeError:
+        return None
+    if suggestion is None:
+        return None
+    verification = verify_rewrite(db, plan_result, suggestion.corrected_sql, use_analyze)
+    if verification is None:
         return None
     return {
-        "verified_with": "cost",
-        "cost_before": round(original_cost, 2),
-        "cost_after": round(alt_cost, 2),
-        "improvement_pct": round((original_cost - alt_cost) / original_cost * 100, 1),
+        "explanation": suggestion.explanation,
+        "rewritten_sql": suggestion.corrected_sql,
+        "verified_with": verification.verified_with,
+        "before": verification.before,
+        "after": verification.after,
+        "improvement_pct": verification.improvement_pct,
+        "new_plan": _plan_result_to_dict(verification.new_plan),
     }
 
 
@@ -122,6 +152,34 @@ def _node_to_dict(node) -> dict:
         "workers_planned": node.workers_planned,
         "row_estimation_ratio": row_est_ratio,
         "children": [_node_to_dict(c) for c in node.children],
+    }
+
+
+def _findings_to_list(findings) -> list:
+    return [
+        {
+            "level": f.level,
+            "category": f.category,
+            "title": f.title,
+            "description": f.description,
+            "recommendation": f.recommendation,
+            "node_type": f.node.node_type if f.node else None,
+            "relation_name": f.node.relation_name if f.node else None,
+            "score_impact": f.score_impact,
+        }
+        for f in findings
+    ]
+
+
+def _plan_result_to_dict(plan_result) -> dict:
+    return {
+        "score": plan_result.score,
+        "grade": plan_result.grade,
+        "planning_time": plan_result.planning_time,
+        "execution_time": plan_result.execution_time,
+        "has_actual": plan_result.has_actual,
+        "plan_tree": _node_to_dict(plan_result.root_node),
+        "findings": _findings_to_list(plan_result.findings),
     }
 
 
@@ -170,20 +228,56 @@ def analyze():
         return jsonify({"error": "SQL sorgusu boş"}), 400
 
     use_analyze = data.get("use_analyze", True)
+    use_ai = bool(data.get("use_ai", False))
 
     try:
         db = _make_db(data)
     except Exception as exc:
         return jsonify({"error": f"Bağlantı hatası: {exc}"}), 400
 
+    ai_fix = None
     try:
-        plan_result  = PlanAnalyzer().analyze(db, sql, use_analyze=use_analyze)
+        try:
+            plan_result = PlanAnalyzer().analyze(db, sql, use_analyze=use_analyze)
+        except QuerySyntaxError as exc:
+            # A real PostgreSQL syntax error (SQLSTATE 42601) — not an
+            # anti-pattern, the query doesn't even parse. Only Claude can
+            # attempt a repair here, and only if the caller opted in.
+            if not use_ai:
+                raise
+            advisor = LLMAdvisor()
+            reason = advisor.unavailable_reason()
+            if reason:
+                return jsonify({"error": str(exc), "ai_unavailable": reason}), 400
+            suggestion = advisor.fix_syntax_error(sql, str(exc), db.server_version)
+            if suggestion is None:
+                return jsonify({
+                    "error": str(exc),
+                    "ai_note": "AI güvenilir bir düzeltme öneremedi.",
+                }), 400
+            try:
+                plan_result = PlanAnalyzer().analyze(db, suggestion.corrected_sql, use_analyze=use_analyze)
+            except Exception as exc2:
+                return jsonify({
+                    "error": str(exc),
+                    "ai_note": f"AI'nin önerdiği düzeltme de hata verdi: {exc2}",
+                    "ai_suggested_sql": suggestion.corrected_sql,
+                }), 400
+            # Verified: the corrected query actually EXPLAINs successfully.
+            # Continue the whole pipeline on the fixed SQL.
+            ai_fix = {
+                "original_sql": sql,
+                "corrected_sql": suggestion.corrected_sql,
+                "explanation": suggestion.explanation,
+            }
+            sql = suggestion.corrected_sql
+
         index_recs, unused = IndexAdvisor().advise(plan_result, db_conn=db)
         query_recs   = QueryAdvisor().advise(sql, db_conn=db)
 
         # A rewritten_sql is only ever shown if EXPLAIN (ANALYZE, when the
         # original query was) confirms it's actually cheaper on this database
-        # — see _verify_rewrite for why that matters.
+        # — see rewrite_verify.verify_rewrite for why that matters.
         rewrite_costs = {}
         for i, r in enumerate(query_recs):
             if not r.rewritten_sql:
@@ -193,6 +287,10 @@ def analyze():
                 r.rewritten_sql = None
             else:
                 rewrite_costs[i] = info
+
+        # Optional: ask Claude for a general rewrite (e.g. subquery -> CTE)
+        # beyond the fixed rule-based patterns. Verified the same way.
+        ai_recommendation = _try_ai_rewrite(db, sql, plan_result, use_analyze) if use_ai else None
 
         # Recalculate final score including query advisor deductions
         query_deduction = sum(r.score_impact for r in query_recs)
@@ -209,20 +307,10 @@ def analyze():
             "execution_time": plan_result.execution_time,
             "has_actual": plan_result.has_actual,
             "formatted_sql": format_sql(sql),
+            "ai_fix": ai_fix,
+            "ai_recommendation": ai_recommendation,
             "plan_tree": _node_to_dict(plan_result.root_node),
-            "findings": [
-                {
-                    "level": f.level,
-                    "category": f.category,
-                    "title": f.title,
-                    "description": f.description,
-                    "recommendation": f.recommendation,
-                    "node_type": f.node.node_type if f.node else None,
-                    "relation_name": f.node.relation_name if f.node else None,
-                    "score_impact": f.score_impact,
-                }
-                for f in plan_result.findings
-            ],
+            "findings": _findings_to_list(plan_result.findings),
             "index_recommendations": [
                 {
                     "priority": r.priority,
@@ -263,6 +351,7 @@ def analyze():
                     "cost_before": rewrite_costs.get(i, {}).get("cost_before"),
                     "cost_after": rewrite_costs.get(i, {}).get("cost_after"),
                     "improvement_pct": rewrite_costs.get(i, {}).get("improvement_pct"),
+                    "new_plan": rewrite_costs.get(i, {}).get("new_plan"),
                 }
                 for i, r in enumerate(query_recs)
             ],

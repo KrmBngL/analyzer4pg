@@ -3,3 +3,8 @@ rich>=13.0.0
 click>=8.0.0
 sqlparse>=0.4.4
 flask>=3.0.0
+
+# Optional: AI destekli sözdizimi düzeltme ve sorgu önerisi (--ai bayrağı / web UI).
+# Kurulum: pip install anthropic  (veya: pip install -e .[ai])
+# Ayrıca ANTHROPIC_API_KEY ortam değişkeni gerekir.
+# anthropic>=0.40.0

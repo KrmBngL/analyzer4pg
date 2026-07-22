@@ -101,7 +101,25 @@ analyzer4pg (mydb)> SELECT o.id, c.name
   ...                AND o.amount > 100;
 ```
 
-REPL komutları: `\q` çıkış, `\h` yardım, `\c dbname` bağlantı değiştir, `\analyze on/off`
+REPL komutları: `\q` çıkış, `\h` yardım, `\c dbname` bağlantı değiştir, `\analyze on/off`, `\ai on/off`
+
+---
+
+### AI Destekli Düzeltme ve Sorgu Önerisi (opsiyonel)
+
+`--ai` bayrağı ile iki şey açılır:
+
+1. **Gerçek sözdizimi hatası düzeltme** — sorgu PostgreSQL'de hiç parse edilemiyorsa (örn. yanlış yazılmış anahtar kelime), Claude'dan bir düzeltme istenir ve düzeltme **veritabanında gerçekten EXPLAIN edilip doğrulanmadan asla gösterilmez**.
+2. **Kural tabanlı motorun kapsamı dışındaki sorgu önerileri** — örn. correlated subquery'yi CTE + JOIN'e çevirmek. Bu öneriler de gerçek `EXPLAIN (ANALYZE)` ile karşılaştırılıp doğrulanmadan gösterilmez.
+
+```bash
+analyzer4pg analyze --ai -H localhost -d mydb -U postgres \
+    -q "SELECT * FROM orders WHRE customer_id = 5"
+```
+
+Kurulum: `pip install anthropic` (veya `pip install -e .[ai]`) ve `ANTHROPIC_API_KEY` ortam değişkeni. Kurulu değilse `--ai` sessizce devre dışı kalır, araç normal şekilde çalışmaya devam eder.
+
+**Önemli sınır:** EXPLAIN doğrulaması, önerilen sorgunun geçerli olduğunu ve gerçekten daha ucuz/hızlı çalıştığını kanıtlar — ama önerilen sorgunun orijinaliyle **aynı sonuç kümesini döndürdüğünü** kanıtlamaz. Kural tabanlı düzeltmelerin aksine (bunlar semantik olarak eşdeğer olacak şekilde elle tasarlanmıştır), AI önerileri kullanılmadan önce sonuçlarının karşılaştırılması önerilir.
 
 ---
 
