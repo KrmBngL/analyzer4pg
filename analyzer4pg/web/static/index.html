@@ -8,124 +8,272 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
 <style>
+/* ---------------------------------------------------------------------
+   Design tokens — validated palette (surfaces, ink, one accent, and a
+   single reserved severity ramp: good -> warning -> serious -> critical).
+   Every color below is a role, referenced everywhere else by variable —
+   see README/dataviz palette conventions this panel follows.
+--------------------------------------------------------------------- */
 :root {
-  --sidebar-bg: #1e293b;
-  --sidebar-text: #cbd5e1;
-  --primary: #3b82f6;
-  --danger: #ef4444;
-  --warning: #f59e0b;
-  --success: #22c55e;
-  --info: #06b6d4;
+  color-scheme: light;
+
+  /* surfaces */
+  --page-bg:      #f6f6f4;
+  --surface:      #fdfdfc;
+  --surface-2:    #f4f3f0;
+  --sidebar-bg:   #17181a;
+  --sidebar-bg-2: #202124;
+  --sidebar-text: #c3c2b7;
+  --sidebar-dim:  #8a8983;
+
+  /* ink */
+  --ink:          #0b0b0b;
+  --ink-2:        #52514e;
+  --ink-muted:    #898781;
+
+  /* structure */
+  --border:       #e5e4de;
+  --border-soft:  rgba(11,11,11,.08);
+  --ring:         0 0 0 3px rgba(42,120,214,.16);
+  --radius-sm:    7px;
+  --radius-md:    11px;
+  --radius-pill:  999px;
+  --shadow-card:  0 1px 2px rgba(11,11,11,.04), 0 3px 10px rgba(11,11,11,.05);
+  --shadow-pop:   0 4px 16px rgba(11,11,11,.10), 0 1px 3px rgba(11,11,11,.06);
+
+  /* accent (single, reserved for actions/identity — never severity) */
+  --accent:       #2a78d6;
+  --accent-ink:   #184f95;
+  --accent-tint:  #e8f1fb;
+
+  /* AI identity accent (violet — kept out of the severity vocabulary) */
+  --ai:           #4a3aa7;
+  --ai-ink:       #4a3aa7;
+  --ai-tint:      #efecfb;
+
+  /* severity ramp — the ONE vocabulary shared by grade, findings,
+     priority, category and the plan tree. Never reused for anything else. */
+  --good:         #0ca30c;
+  --good-ink:     #0a6b0a;
+  --good-tint:    #e8f7e8;
+
+  --warning:      #eda100;
+  --warning-ink:  #92400e;
+  --warning-tint: #fdf1da;
+
+  --serious:      #eb6834;
+  --serious-ink:  #9a3412;
+  --serious-tint: #fdece2;
+
+  --critical:     #d03b3b;
+  --critical-ink: #a32424;
+  --critical-tint:#fbe9e9;
 }
-body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:100vh; overflow:hidden; display:flex; flex-direction:column; }
-#navbar { background:var(--sidebar-bg); padding:10px 20px; display:flex; align-items:center; gap:12px; flex-shrink:0; }
-#navbar .brand { color:#fff; font-weight:700; font-size:1.1rem; letter-spacing:.5px; }
-#navbar .brand span { color:var(--primary); }
-#conn-status { font-size:.8rem; padding:3px 10px; border-radius:20px; }
-.status-ok { background:#166534; color:#86efac; }
-.status-err { background:#7f1d1d; color:#fca5a5; }
-.status-idle { background:#334155; color:#94a3b8; }
+
+* { box-sizing:border-box; }
+body {
+  background:var(--page-bg); color:var(--ink);
+  font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  height:100vh; overflow:hidden; display:flex; flex-direction:column;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ---- Navbar ---- */
+#navbar {
+  background:var(--sidebar-bg); padding:11px 20px;
+  display:flex; align-items:center; gap:12px; flex-shrink:0;
+  border-bottom:1px solid rgba(255,255,255,.06);
+}
+#navbar .brand { color:#fff; font-weight:700; font-size:1.05rem; letter-spacing:.2px; display:flex; align-items:center; gap:8px; }
+#navbar .brand span { color:var(--accent); font-weight:800; }
+#navbar .brand small { font-weight:500; font-size:.68rem; color:var(--sidebar-dim); letter-spacing:.04em; text-transform:uppercase; margin-left:2px; }
+#conn-status {
+  font-size:.74rem; font-weight:600; letter-spacing:.02em;
+  padding:4px 12px 4px 10px; border-radius:var(--radius-pill);
+  display:inline-flex; align-items:center; gap:6px;
+}
+#conn-status::before { content:''; width:6px; height:6px; border-radius:50%; background:currentColor; flex-shrink:0; }
+.status-ok   { background:rgba(12,163,12,.16); color:#5fd65f; }
+.status-err  { background:rgba(208,59,59,.18); color:#f4a3a3; }
+.status-idle { background:rgba(255,255,255,.08); color:var(--sidebar-dim); }
+#navbar .icon-btn {
+  background:transparent; color:var(--sidebar-dim); border:1px solid rgba(255,255,255,.14);
+  border-radius:var(--radius-sm); font-size:.78rem; font-weight:600; padding:5px 12px;
+  transition:border-color .15s,color .15s;
+}
+#navbar .icon-btn:hover { color:#fff; border-color:rgba(255,255,255,.32); }
+
 #main-layout { display:flex; flex:1; overflow:hidden; }
-#sidebar { width:280px; background:var(--sidebar-bg); color:var(--sidebar-text); padding:16px; overflow-y:auto; flex-shrink:0; }
-#sidebar label { font-size:.78rem; color:#94a3b8; margin-bottom:2px; display:block; }
-#sidebar input, #sidebar select { background:#0f172a; border:1px solid #334155; color:#e2e8f0; border-radius:6px; padding:6px 10px; font-size:.85rem; width:100%; margin-bottom:10px; }
-#sidebar input:focus, #sidebar select:focus { outline:none; border-color:var(--primary); box-shadow:0 0 0 2px rgba(59,130,246,.25); }
+
+/* ---- Sidebar ---- */
+#sidebar { width:284px; background:var(--sidebar-bg); color:var(--sidebar-text); padding:18px; overflow-y:auto; flex-shrink:0; border-right:1px solid rgba(255,255,255,.06); }
+.sb-heading { font-size:.68rem; text-transform:uppercase; letter-spacing:.08em; color:var(--sidebar-dim); margin-bottom:12px; font-weight:700; }
+#sidebar label { font-size:.76rem; color:var(--sidebar-dim); margin-bottom:3px; display:block; font-weight:500; }
+#sidebar input:not([type=checkbox]), #sidebar select {
+  background:var(--sidebar-bg-2); border:1px solid rgba(255,255,255,.09); color:#f2f1ee;
+  border-radius:var(--radius-sm); padding:7px 10px; font-size:.85rem; width:100%; margin-bottom:11px;
+  transition:border-color .15s,box-shadow .15s;
+}
+#sidebar input::placeholder { color:#5c5b57; }
+#sidebar input:not([type=checkbox]):focus, #sidebar select:focus { outline:none; border-color:var(--accent); box-shadow:var(--ring); }
+#sidebar .btn-primary-full {
+  background:var(--accent); color:#fff; font-weight:700; border:none; border-radius:var(--radius-sm);
+  padding:8px 0; width:100%; margin-bottom:8px; font-size:.85rem; transition:background .15s;
+}
+#sidebar .btn-primary-full:hover { background:var(--accent-ink); }
+#sidebar .btn-ghost-full {
+  background:var(--sidebar-bg-2); color:var(--sidebar-dim); border:1px solid rgba(255,255,255,.1);
+  border-radius:var(--radius-sm); padding:8px 0; width:100%; font-size:.85rem; font-weight:600;
+}
+#sidebar .btn-ghost-full:hover { color:#fff; border-color:rgba(255,255,255,.24); }
+#conn-info { font-size:.76rem; color:var(--sidebar-dim); margin-top:12px; line-height:1.7; display:none; }
+#conn-info b { color:#e5e4de; }
+
+#sidebar label.opt-row { display:flex; align-items:center; gap:9px; cursor:pointer; margin-bottom:0; }
+.opt-row input[type=checkbox] { width:16px; height:16px; margin:0; accent-color:var(--accent); flex-shrink:0; }
+.opt-row span { font-size:.83rem; }
+.opt-hint { font-size:.72rem; color:var(--sidebar-dim); margin:4px 0 0 25px; line-height:1.5; }
+
+/* ---- Content / editor ---- */
 #content { flex:1; display:flex; flex-direction:column; overflow:hidden; }
-#editor-area { padding:12px 16px; background:#fff; border-bottom:1px solid #e2e8f0; }
-.CodeMirror { height:160px; border-radius:8px; font-size:.88rem; }
-#editor-toolbar { display:flex; align-items:center; gap:10px; margin-top:8px; }
-#results { flex:1; overflow-y:auto; padding:16px; }
+#editor-area { padding:14px 18px; background:var(--surface); border-bottom:1px solid var(--border); }
+.editor-label { font-size:.72rem; color:var(--ink-muted); margin-bottom:7px; font-weight:600; letter-spacing:.03em; text-transform:uppercase; }
+.CodeMirror { height:158px; border-radius:var(--radius-md); font-size:.87rem; box-shadow:var(--shadow-card); border:1px solid rgba(0,0,0,.18); }
+#editor-toolbar { display:flex; align-items:center; gap:12px; margin-top:10px; }
+#run-btn {
+  background:var(--accent); color:#fff; font-weight:700; border:none; border-radius:var(--radius-sm);
+  padding:8px 20px; font-size:.85rem; letter-spacing:.01em; transition:background .15s,transform .05s;
+  box-shadow:0 1px 2px rgba(42,120,214,.35);
+}
+#run-btn:hover { background:var(--accent-ink); }
+#run-btn:active { transform:translateY(1px); }
+#editor-toolbar .hint { font-size:.76rem; color:var(--ink-muted); }
+#error-msg { color:var(--critical-ink); font-size:.8rem; font-weight:600; display:none; }
 
-/* Score bar */
-#score-card { background:#fff; border-radius:10px; padding:16px 20px; margin-bottom:12px; display:flex; align-items:center; gap:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
-.grade-badge { font-size:2rem; font-weight:800; width:52px; height:52px; border-radius:10px; display:flex; align-items:center; justify-content:center; }
-.grade-A { background:#dcfce7; color:#16a34a; }
-.grade-B { background:#d1fae5; color:#059669; }
-.grade-C { background:#fef9c3; color:#ca8a04; }
-.grade-D { background:#fee2e2; color:#dc2626; }
-.grade-F { background:#fecaca; color:#991b1b; }
-.score-bar-wrap { flex:1; }
-.score-bar-track { height:10px; background:#e2e8f0; border-radius:5px; overflow:hidden; }
-.score-bar-fill { height:100%; border-radius:5px; transition:width .6s ease; }
-.fill-good { background:linear-gradient(90deg,#22c55e,#86efac); }
-.fill-mid  { background:linear-gradient(90deg,#f59e0b,#fcd34d); }
-.fill-bad  { background:linear-gradient(90deg,#ef4444,#fca5a5); }
-.timing-pill { font-size:.75rem; background:#f1f5f9; border-radius:20px; padding:4px 12px; color:#64748b; white-space:nowrap; }
+#results { flex:1; overflow-y:auto; padding:18px; }
+#results-placeholder { color:var(--ink-muted); }
+#results-placeholder .ph-icon { font-size:2.4rem; opacity:.65; filter:grayscale(.15); }
+#results-placeholder .ph-title { font-size:.92rem; font-weight:600; color:var(--ink-2); }
+#results-placeholder .ph-sub { font-size:.78rem; }
 
-/* Accordion */
-.res-card { background:#fff; border-radius:10px; margin-bottom:10px; box-shadow:0 1px 3px rgba(0,0,0,.07); overflow:hidden; }
-.res-card-header { padding:12px 16px; cursor:pointer; display:flex; align-items:center; gap:10px; user-select:none; }
-.res-card-header:hover { background:#f8fafc; }
-.res-card-body { padding:14px 16px; border-top:1px solid #f1f5f9; display:none; }
+/* ---- Score / meter (the panel's hero figure) ---- */
+#score-card {
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md);
+  padding:18px 22px; margin-bottom:14px; display:flex; align-items:center; gap:22px;
+  box-shadow:var(--shadow-card);
+}
+.grade-badge {
+  font-size:1.7rem; font-weight:800; width:56px; height:56px; border-radius:var(--radius-md);
+  display:flex; align-items:center; justify-content:center; flex-shrink:0; font-variant-numeric:normal;
+  border:1px solid var(--border-soft);
+}
+.grade-A, .grade-B { background:var(--good-tint); color:var(--good-ink); }
+.grade-C           { background:var(--warning-tint); color:var(--warning-ink); }
+.grade-D           { background:var(--serious-tint); color:var(--serious-ink); }
+.grade-F           { background:var(--critical-tint); color:var(--critical-ink); }
+.score-bar-wrap { flex:1; min-width:0; }
+.score-figure { font-size:1.6rem; font-weight:700; letter-spacing:-.01em; }
+.score-figure small { font-size:.85rem; font-weight:600; color:var(--ink-muted); }
+.score-bar-track { height:10px; border-radius:var(--radius-pill); overflow:hidden; margin-top:6px; }
+.score-bar-fill { height:100%; border-radius:var(--radius-pill); transition:width .6s ease; }
+.fill-good { background:var(--good); }
+.fill-mid  { background:var(--warning); }
+.fill-bad  { background:var(--critical); }
+.track-good { background:var(--good-tint); }
+.track-mid  { background:var(--warning-tint); }
+.track-bad  { background:var(--critical-tint); }
+.timing-pill {
+  font-size:.73rem; background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-pill);
+  padding:3px 11px; color:var(--ink-2); white-space:nowrap; font-weight:500;
+}
+.timing-pill.accent { background:var(--accent-tint); color:var(--accent-ink); border-color:transparent; font-weight:700; }
+
+/* ---- Accordion cards ---- */
+.res-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-md); margin-bottom:12px; box-shadow:var(--shadow-card); overflow:hidden; }
+.res-card-header { padding:13px 16px; cursor:pointer; display:flex; align-items:center; gap:10px; user-select:none; transition:background .12s; }
+.res-card-header:hover { background:var(--surface-2); }
+.res-card-header .title { font-weight:700; font-size:.88rem; letter-spacing:-.01em; }
+.res-card-body { padding:15px 16px; border-top:1px solid var(--border); display:none; }
 .res-card-body.open { display:block; }
-.badge-count { font-size:.72rem; font-weight:700; padding:2px 8px; border-radius:20px; margin-left:auto; }
+.badge-count { font-size:.71rem; font-weight:700; padding:2px 9px; border-radius:var(--radius-pill); margin-left:auto; }
+.card-arrow { color:var(--ink-muted); font-size:.72rem; transition:transform .15s; }
 
-/* Plan tree */
-.plan-tree { font-family:'Consolas','Courier New',monospace; font-size:.82rem; line-height:1.6; }
-.pnode { padding:3px 0 3px 20px; border-left:2px solid #e2e8f0; margin-left:8px; }
+/* ---- Plan tree (the centerpiece — reads like an execution-plan visualizer) ---- */
+.plan-tree { font-family:ui-monospace,'Cascadia Code','Consolas','SFMono-Regular',monospace; font-size:.81rem; line-height:1.55; }
+.pnode { padding:2px 0 2px 18px; border-left:1px dashed var(--border); margin-left:9px; }
 .pnode:last-child { border-left-color:transparent; }
-.pnode-row { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px; padding:4px 8px; border-radius:6px; margin-bottom:2px; cursor:pointer; }
-.pnode-row:hover { background:#f8fafc; }
-.pnode-type { font-weight:700; }
-.danger .pnode-type { color:#dc2626; }
-.warning .pnode-type { color:#d97706; }
-.success .pnode-type { color:#16a34a; }
-.normal .pnode-type { color:#475569; }
-.pnode-rel { color:#2563eb; font-weight:600; }
-.pnode-idx { color:#7c3aed; font-size:.78rem; }
-.pnode-cost { color:#94a3b8; font-size:.78rem; }
-.pnode-time { color:#0891b2; font-size:.78rem; font-weight:600; }
-.pnode-rows { color:#64748b; font-size:.78rem; }
-.pnode-warn { color:#dc2626; font-size:.75rem; font-weight:700; }
-.pnode-detail { font-size:.75rem; color:#94a3b8; width:100%; padding-left:4px; white-space:pre-wrap; word-break:break-word; }
+.pnode-row {
+  display:flex; align-items:baseline; flex-wrap:wrap; gap:7px; padding:5px 10px;
+  border-radius:6px; margin-bottom:2px; cursor:pointer; border-left:3px solid transparent;
+  transition:background .1s;
+}
+.pnode-row:hover { background:var(--surface-2); }
+.pnode-type { font-weight:700; letter-spacing:-.01em; }
+.pnode-dot { display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:1px; }
+.danger  .pnode-row { border-left-color:var(--critical); background:var(--critical-tint); }
+.danger  .pnode-type { color:var(--critical-ink); } .danger .pnode-dot { background:var(--critical); }
+.warning .pnode-row { border-left-color:var(--warning); }
+.warning .pnode-type { color:var(--warning-ink); } .warning .pnode-dot { background:var(--warning); }
+.success .pnode-row { border-left-color:var(--good); }
+.success .pnode-type { color:var(--good-ink); } .success .pnode-dot { background:var(--good); }
+.normal  .pnode-row { border-left-color:var(--border); }
+.normal  .pnode-type { color:var(--ink-2); } .normal .pnode-dot { background:var(--ink-muted); }
+.pnode-rel { color:var(--accent-ink); font-weight:600; }
+.pnode-idx { color:var(--ai); font-size:.77rem; }
+.pnode-cost { color:var(--ink-muted); font-size:.77rem; }
+.pnode-time { color:var(--accent-ink); font-size:.77rem; font-weight:700; }
+.pnode-rows { color:var(--ink-2); font-size:.77rem; }
+.pnode-warn { color:var(--critical-ink); font-size:.74rem; font-weight:700; background:var(--critical-tint); padding:1px 6px; border-radius:4px; }
+.pnode-detail { font-size:.74rem; color:var(--ink-muted); width:100%; padding-left:5px; white-space:pre-wrap; word-break:break-word; }
 
-/* Findings */
-.finding { padding:10px 14px; border-radius:8px; margin-bottom:8px; border-left:4px solid; }
-.finding-CRITICAL { background:#fff1f2; border-color:#ef4444; }
-.finding-WARNING  { background:#fffbeb; border-color:#f59e0b; }
-.finding-INFO     { background:#f0f9ff; border-color:#06b6d4; }
-.finding-title { font-weight:700; font-size:.88rem; margin-bottom:4px; }
-.finding-desc { font-size:.82rem; color:#475569; white-space:pre-line; }
-.finding-rec  { font-size:.8rem; color:#2563eb; margin-top:6px; white-space:pre-line; }
+/* ---- Findings ---- */
+.finding { padding:11px 14px; border-radius:var(--radius-sm); margin-bottom:8px; border-left:3px solid; background:var(--surface-2); }
+.finding-CRITICAL { border-color:var(--critical); background:var(--critical-tint); }
+.finding-WARNING  { border-color:var(--warning); background:var(--warning-tint); }
+.finding-INFO     { border-color:var(--accent); background:var(--accent-tint); }
+.finding-title { font-weight:700; font-size:.87rem; margin-bottom:4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.finding-desc { font-size:.81rem; color:var(--ink-2); white-space:pre-line; }
+.finding-rec  { font-size:.79rem; color:var(--ink); font-weight:600; margin-top:7px; white-space:pre-line; }
 
-/* Index recs */
-.idx-rec { background:#f8fafc; border-radius:8px; padding:12px 14px; margin-bottom:10px; border:1px solid #e2e8f0; }
-.idx-rec-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
-.ddl-block { background:#1e293b; color:#e2e8f0; border-radius:6px; padding:10px 12px; font-family:monospace; font-size:.8rem; position:relative; white-space:pre; overflow-x:auto; }
-.copy-btn { position:absolute; top:6px; right:8px; background:#334155; color:#94a3b8; border:none; border-radius:4px; padding:2px 8px; font-size:.72rem; cursor:pointer; }
-.copy-btn:hover { background:#475569; color:#fff; }
+/* ---- Index recommendations ---- */
+.idx-rec { background:var(--surface-2); border-radius:var(--radius-sm); padding:13px 15px; margin-bottom:10px; border:1px solid var(--border); }
+.idx-rec-header { display:flex; align-items:center; gap:8px; margin-bottom:7px; flex-wrap:wrap; }
+.ddl-block { background:var(--sidebar-bg-2); color:#e7e6e1; border-radius:var(--radius-sm); padding:10px 12px; font-family:ui-monospace,monospace; font-size:.79rem; position:relative; white-space:pre; overflow-x:auto; border:1px solid rgba(255,255,255,.06); }
+.copy-btn { position:absolute; top:7px; right:9px; background:rgba(255,255,255,.08); color:var(--sidebar-dim); border:none; border-radius:4px; padding:3px 9px; font-size:.71rem; cursor:pointer; font-weight:600; }
+.copy-btn:hover { background:rgba(255,255,255,.16); color:#fff; }
 
-/* Query recs */
-.qrec { border-radius:8px; margin-bottom:10px; overflow:hidden; border:1px solid #e2e8f0; }
-.qrec-header { padding:10px 14px; font-weight:700; font-size:.88rem; display:flex; align-items:center; gap:8px; }
-.qrec-body { padding:10px 14px; background:#f8fafc; font-size:.82rem; color:#475569; white-space:pre-line; }
-.qrec-code { background:#1e293b; color:#e2e8f0; font-family:monospace; font-size:.78rem; padding:8px 12px; white-space:pre; overflow-x:auto; }
-.qrec-label { font-size:.72rem; font-weight:700; color:#94a3b8; padding:6px 14px 2px; background:#f8fafc; }
-.qrec-gain { font-size:.78rem; font-weight:700; color:#059669; padding:4px 14px 0; background:#f8fafc; }
-.diff-add { background:#22c55e; color:#052e16; border-radius:3px; padding:0 2px; font-weight:700; }
-.qrec-apply-row { padding:8px 14px 12px; background:#f8fafc; }
-.qrec-apply-btn { background:var(--primary); color:#fff; border:none; border-radius:6px; padding:5px 14px; font-size:.78rem; font-weight:700; cursor:pointer; }
-.qrec-apply-btn:hover { opacity:.9; }
-.qrec-newplan { background:#f8fafc; padding:0 14px 12px; border-top:1px dashed #e2e8f0; }
-.qrec-newplan summary { cursor:pointer; font-size:.78rem; font-weight:700; color:#2563eb; padding:8px 0; user-select:none; }
+/* ---- Query recommendations ---- */
+.qrec { border-radius:var(--radius-sm); margin-bottom:10px; overflow:hidden; border:1px solid var(--border); }
+.qrec-header { padding:10px 14px; font-weight:700; font-size:.87rem; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.qrec-body { padding:11px 14px; background:var(--surface-2); font-size:.81rem; color:var(--ink-2); white-space:pre-line; }
+.qrec-code { background:var(--sidebar-bg-2); color:#e7e6e1; font-family:ui-monospace,monospace; font-size:.78rem; padding:9px 12px; white-space:pre; overflow-x:auto; }
+.qrec-label { font-size:.7rem; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--ink-muted); padding:7px 14px 3px; background:var(--surface-2); }
+.qrec-gain { font-size:.78rem; font-weight:700; color:var(--good-ink); padding:5px 14px 0; background:var(--surface-2); }
+.diff-add { background:var(--good-tint); color:var(--good-ink); border-bottom:2px solid var(--good); border-radius:3px; padding:0 3px; font-weight:700; }
+.qrec-apply-row { padding:9px 14px 13px; background:var(--surface-2); }
+.qrec-apply-btn { background:var(--accent); color:#fff; border:none; border-radius:var(--radius-sm); padding:6px 15px; font-size:.78rem; font-weight:700; cursor:pointer; }
+.qrec-apply-btn:hover { background:var(--accent-ink); }
+.qrec-newplan { background:var(--surface-2); padding:0 14px 13px; border-top:1px dashed var(--border); }
+.qrec-newplan summary { cursor:pointer; font-size:.78rem; font-weight:700; color:var(--accent-ink); padding:9px 0; user-select:none; }
 .qrec-newplan[open] summary { margin-bottom:6px; }
-.qrec-newplan .plan-tree { background:#fff; border:1px solid #e2e8f0; border-radius:6px; padding:8px 10px; margin-bottom:8px; }
+.qrec-newplan .plan-tree { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-sm); padding:9px 11px; margin-bottom:8px; }
 
-/* Priority badges */
-.pri-HIGH   { background:#fee2e2; color:#991b1b; }
-.pri-MEDIUM { background:#fef3c7; color:#92400e; }
-.pri-LOW    { background:#f0fdf4; color:#166534; }
-.lvl-CRITICAL { background:#fee2e2; color:#991b1b; }
-.lvl-WARNING  { background:#fef3c7; color:#92400e; }
-.lvl-INFO     { background:#e0f2fe; color:#075985; }
+/* ---- Badges — one shared severity vocabulary everywhere ---- */
+.badge { font-size:.68rem !important; font-weight:700 !important; letter-spacing:.03em; text-transform:uppercase; padding:2px 9px !important; border-radius:var(--radius-pill) !important; }
+.pri-HIGH, .lvl-CRITICAL      { background:var(--critical-tint); color:var(--critical-ink); }
+.pri-MEDIUM, .lvl-WARNING     { background:var(--warning-tint); color:var(--warning-ink); }
+.pri-LOW                      { background:var(--good-tint); color:var(--good-ink); }
+.lvl-INFO                     { background:var(--accent-tint); color:var(--accent-ink); }
+.badge-partial { background:var(--ai-tint); color:var(--ai-ink); }
+.empty-ok { color:var(--good-ink); font-size:.85rem; font-weight:600; display:flex; align-items:center; gap:6px; }
 
-/* Unused indexes table */
-.unused-table { font-size:.8rem; width:100%; border-collapse:collapse; }
-.unused-table th { background:#f1f5f9; padding:6px 10px; text-align:left; font-weight:600; color:#475569; }
-.unused-table td { padding:6px 10px; border-top:1px solid #f1f5f9; color:#334155; font-family:monospace; }
+/* ---- Unused indexes table ---- */
+.unused-table { font-size:.79rem; width:100%; border-collapse:collapse; }
+.unused-table th { background:var(--surface-2); padding:7px 10px; text-align:left; font-weight:700; color:var(--ink-muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; }
+.unused-table td { padding:7px 10px; border-top:1px solid var(--border); color:var(--ink-2); font-family:ui-monospace,monospace; }
 
-#loading { display:none; position:fixed; inset:0; background:rgba(15,23,42,.5); z-index:9999; align-items:center; justify-content:center; }
-.spinner { width:48px; height:48px; border:5px solid #334155; border-top-color:var(--primary); border-radius:50%; animation:spin .8s linear infinite; }
+#loading { display:none; position:fixed; inset:0; background:rgba(11,11,11,.45); backdrop-filter:blur(1px); z-index:9999; align-items:center; justify-content:center; }
+.spinner { width:42px; height:42px; border:4px solid rgba(255,255,255,.18); border-top-color:var(--accent); border-radius:50%; animation:spin .75s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
 </head>
@@ -136,10 +284,10 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
 
 <!-- Navbar -->
 <div id="navbar">
-  <div class="brand">🐘 analyzer<span>4pg</span></div>
+  <div class="brand">🐘 analyzer<span>4pg</span><small>Query Advisor</small></div>
   <span id="conn-status" class="status-idle">Bağlı değil</span>
   <div style="margin-left:auto;display:flex;gap:8px;">
-    <button class="btn btn-sm btn-outline-secondary" onclick="toggleSidebar()" style="color:#94a3b8;border-color:#475569">⚙ Bağlantı</button>
+    <button class="icon-btn" onclick="toggleSidebar()">⚙ Bağlantı</button>
   </div>
 </div>
 
@@ -148,7 +296,7 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
 
   <!-- Sidebar: connection settings -->
   <div id="sidebar">
-    <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin-bottom:12px;font-weight:700">Bağlantı Ayarları</div>
+    <div class="sb-heading">Bağlantı Ayarları</div>
 
     <label>Sunucu</label>
     <input id="c-host" value="localhost" placeholder="localhost">
@@ -173,10 +321,10 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
       <option value="allow">allow</option>
     </select>
 
-    <button class="btn btn-sm w-100 mb-2" style="background:var(--primary);color:#fff;font-weight:600" onclick="testConnection()">🔌 Bağlan</button>
-    <button class="btn btn-sm w-100" style="background:#0f172a;color:#94a3b8;border:1px solid #334155" onclick="clearResults()">🗑 Temizle</button>
+    <button class="btn-primary-full" onclick="testConnection()">🔌 Bağlan</button>
+    <button class="btn-ghost-full" onclick="clearResults()">🗑 Temizle</button>
 
-    <div id="conn-info" style="font-size:.75rem;color:#64748b;margin-top:12px;line-height:1.6;display:none"></div>
+    <div id="conn-info"></div>
 
     <div id="schema-section" style="display:none;margin-top:10px">
       <label>Şema</label>
@@ -185,18 +333,18 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
       </select>
     </div>
 
-    <div style="margin-top:20px;border-top:1px solid #334155;padding-top:14px;">
-      <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:#64748b;margin-bottom:8px;font-weight:700">Seçenekler</div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
-        <input type="checkbox" id="opt-analyze" checked style="width:auto;margin:0">
-        <span style="font-size:.82rem">EXPLAIN ANALYZE kullan</span>
+    <div style="margin-top:22px;border-top:1px solid rgba(255,255,255,.08);padding-top:16px;">
+      <div class="sb-heading">Seçenekler</div>
+      <label class="opt-row">
+        <input type="checkbox" id="opt-analyze" checked>
+        <span>EXPLAIN ANALYZE kullan</span>
       </label>
-      <div style="font-size:.72rem;color:#475569;margin-top:4px">Kapalıysa sorgu çalıştırılmaz, sadece plan hesaplanır.</div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
-        <input type="checkbox" id="opt-ai" style="width:auto;margin:0">
-        <span style="font-size:.82rem">🤖 AI destekli düzeltme/öneri</span>
+      <div class="opt-hint">Kapalıysa sorgu çalıştırılmaz, sadece plan hesaplanır.</div>
+      <label class="opt-row" style="margin-top:12px">
+        <input type="checkbox" id="opt-ai">
+        <span>🤖 AI destekli düzeltme/öneri</span>
       </label>
-      <div style="font-size:.72rem;color:#475569;margin-top:4px">Sözdizimi hatalarını düzeltmeyi ve ek sorgu önerileri üretmeyi dener (ANTHROPIC_API_KEY gerekir). Her öneri veritabanında gerçek EXPLAIN ile doğrulanmadan gösterilmez.</div>
+      <div class="opt-hint">Sözdizimi hatalarını düzeltmeyi ve ek sorgu önerileri üretmeyi dener (ANTHROPIC_API_KEY gerekir). Her öneri veritabanında gerçek EXPLAIN ile doğrulanmadan gösterilmez.</div>
     </div>
   </div>
 
@@ -205,21 +353,21 @@ body { background:#f1f5f9; font-family:'Segoe UI',system-ui,sans-serif; height:1
 
     <!-- SQL Editor -->
     <div id="editor-area">
-      <div style="font-size:.75rem;color:#94a3b8;margin-bottom:6px">SQL Sorgusu</div>
+      <div class="editor-label">SQL Sorgusu</div>
       <textarea id="sql-input">SELECT * FROM orders WHERE customer_id = 5;</textarea>
       <div id="editor-toolbar">
-        <button class="btn btn-sm px-4" style="background:var(--primary);color:#fff;font-weight:700" onclick="analyze()">▶ Analiz Et</button>
-        <span style="font-size:.78rem;color:#94a3b8">Ctrl+Enter ile de çalıştırabilirsiniz</span>
-        <span id="error-msg" style="color:#ef4444;font-size:.8rem;display:none"></span>
+        <button id="run-btn" onclick="analyze()">▶ Analiz Et</button>
+        <span class="hint">Ctrl+Enter ile de çalıştırabilirsiniz</span>
+        <span id="error-msg"></span>
       </div>
     </div>
 
     <!-- Results -->
     <div id="results">
-      <div id="results-placeholder" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:200px;color:#94a3b8;gap:8px;">
-        <div style="font-size:2.5rem">🐘</div>
-        <div style="font-size:.9rem">Bağlanın ve sorgunuzu analiz edin</div>
-        <div style="font-size:.78rem">Execution plan, index önerileri ve sorgu tavsiyeleri burada görünecek</div>
+      <div id="results-placeholder" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:220px;gap:9px;">
+        <div class="ph-icon">🐘</div>
+        <div class="ph-title">Bağlanın ve sorgunuzu analiz edin</div>
+        <div class="ph-sub">Execution plan, index önerileri ve sorgu tavsiyeleri burada görünecek</div>
       </div>
       <div id="results-content" style="display:none"></div>
     </div>
@@ -301,7 +449,7 @@ async function loadSchemas(params) {
 
 function onSchemaChange() {
   const schema = document.getElementById('c-schema').value;
-  document.getElementById('c-schema').style.borderColor = schema ? 'var(--primary)' : '';
+  document.getElementById('c-schema').style.borderColor = schema ? 'var(--accent)' : '';
 }
 
 function showError(msg) {
@@ -359,16 +507,24 @@ function esc(s) {
 }
 
 function badge(cls, text) {
-  return `<span class="badge ${cls}" style="font-size:.72rem">${esc(text)}</span>`;
+  return `<span class="badge ${cls}">${esc(text)}</span>`;
 }
 
-function card(title, countBadge, innerHtml, badgeCls='bg-secondary') {
+const TONE_STYLE = {
+  critical: 'background:var(--critical-tint);color:var(--critical-ink)',
+  warning:  'background:var(--warning-tint);color:var(--warning-ink)',
+  good:     'background:var(--good-tint);color:var(--good-ink)',
+  accent:   'background:var(--accent-tint);color:var(--accent-ink)',
+};
+
+function card(title, count, innerHtml, tone) {
   const id = 'card-' + Math.random().toString(36).slice(2);
+  const style = TONE_STYLE[tone] || 'background:var(--surface-2);color:var(--ink-muted)';
   return `<div class="res-card">
     <div class="res-card-header" onclick="toggleCard('${id}')">
-      <span style="font-weight:700;font-size:.9rem">${title}</span>
-      ${countBadge !== null ? `<span class="badge-count ${badgeCls}">${countBadge}</span>` : ''}
-      <span style="margin-left:${countBadge!==null?'0':'auto'};color:#94a3b8" id="${id}-arrow">▼</span>
+      <span class="title">${title}</span>
+      ${count !== null ? `<span class="badge-count" style="${style}">${count}</span>` : ''}
+      <span class="card-arrow" style="margin-left:${count!==null?'0':'auto'}" id="${id}-arrow">▼</span>
     </div>
     <div class="res-card-body open" id="${id}">${innerHtml}</div>
   </div>`;
@@ -392,6 +548,7 @@ function nodeClass(n, rootCost) {
 function renderNode(n, rootCost) {
   const cls = nodeClass(n, rootCost);
   let header = `<div class="pnode-row ${cls}">`;
+  header += `<span class="pnode-dot"></span>`;
   header += `<span class="pnode-type">${esc(n.node_type)}</span>`;
   if (n.relation_name) header += `<span class="pnode-rel"> → ${esc(n.relation_name)}${n.alias && n.alias !== n.relation_name ? ' ('+esc(n.alias)+')' : ''}</span>`;
   if (n.index_name) header += `<span class="pnode-idx">[${esc(n.index_name)}]</span>`;
@@ -417,11 +574,11 @@ function renderNode(n, rootCost) {
 
 // ---- Findings ----
 function renderFindings(findings) {
-  if (!findings.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Plan analizi sorun tespit etmedi.</div>';
+  if (!findings.length) return '<div class="empty-ok">✓ Plan analizi sorun tespit etmedi.</div>';
   return findings.map(f => `
     <div class="finding finding-${f.level}">
       <div class="finding-title">${badge('lvl-'+f.level, f.level)} ${esc(f.title)}
-        ${f.relation_name ? `<span style="font-size:.78rem;color:#94a3b8"> → ${esc(f.node_type)} on ${esc(f.relation_name)}</span>` : ''}
+        ${f.relation_name ? `<span style="font-size:.78rem;color:var(--ink-muted)"> → ${esc(f.node_type)} on ${esc(f.relation_name)}</span>` : ''}
       </div>
       <div class="finding-desc">${esc(f.description)}</div>
       <div class="finding-rec">💡 ${esc(f.recommendation)}</div>
@@ -431,7 +588,7 @@ function renderFindings(findings) {
 // ---- Index recommendations ----
 function renderIndexRecs(recs, unused) {
   let html = '';
-  if (!recs.length && !unused.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Mevcut indexler yeterli görünüyor.</div>';
+  if (!recs.length && !unused.length) return '<div class="empty-ok">✓ Mevcut indexler yeterli görünüyor.</div>';
 
   recs.forEach((r,i) => {
     const rid = 'ddl-'+i;
@@ -439,22 +596,22 @@ function renderIndexRecs(recs, unused) {
       <div class="idx-rec-header">
         ${badge('pri-'+r.priority, r.priority)}
         <strong>${esc(r.schema)}.${esc(r.table)}</strong>
-        <span style="color:#2563eb;font-size:.82rem">(${r.columns.map(esc).join(', ')})</span>
-        ${r.is_partial ? badge('bg-info text-dark','PARTIAL') : ''}
-        <span style="margin-left:auto;font-size:.75rem;color:#64748b">${esc(r.estimated_improvement)}</span>
+        <span style="color:var(--accent-ink);font-size:.82rem">(${r.columns.map(esc).join(', ')})</span>
+        ${r.is_partial ? badge('badge-partial','PARTIAL') : ''}
+        <span style="margin-left:auto;font-size:.74rem;color:var(--ink-muted)">${esc(r.estimated_improvement)}</span>
       </div>
-      <div style="font-size:.8rem;color:#475569;margin-bottom:6px">${esc(r.reason)}</div>
-      <div style="font-size:.78rem;color:#7c3aed;margin-bottom:8px">📈 ${esc(r.impact)}</div>
+      <div style="font-size:.8rem;color:var(--ink-2);margin-bottom:6px">${esc(r.reason)}</div>
+      <div style="font-size:.78rem;color:var(--ai-ink);margin-bottom:8px">📈 ${esc(r.impact)}</div>
       <div class="ddl-block" id="${rid}">${esc(r.ddl)}<button class="copy-btn" onclick="copyDDL('${rid}')">Kopyala</button></div>
     </div>`;
   });
 
   if (unused.length) {
-    html += `<div style="font-weight:700;font-size:.85rem;margin:12px 0 8px;color:#d97706">⚠ Kullanılmayan Indexler (${unused.length})</div>
+    html += `<div style="font-weight:700;font-size:.84rem;margin:14px 0 8px;color:var(--warning-ink)">⚠ Kullanılmayan Indexler (${unused.length})</div>
     <table class="unused-table"><thead><tr><th>Index</th><th>Tablo</th><th>Boyut</th><th>DROP DDL</th></tr></thead><tbody>`;
     unused.forEach(u => {
       html += `<tr><td>${esc(u.index_name)}</td><td>${esc(u.schema)}.${esc(u.table)}</td><td>${esc(u.index_size)}</td>
-        <td style="color:#ef4444">DROP INDEX CONCURRENTLY ${esc(u.index_name)};</td></tr>`;
+        <td style="color:var(--critical-ink)">DROP INDEX CONCURRENTLY ${esc(u.index_name)};</td></tr>`;
     });
     html += '</tbody></table>';
   }
@@ -506,9 +663,11 @@ function renderRewriteHtml(before, after) {
 
 // ---- Query recommendations ----
 function renderQueryRecs(recs, formattedSql) {
-  if (!recs.length) return '<div style="color:#22c55e;font-size:.85rem">✓ Sorguda belirgin anti-pattern tespit edilmedi.</div>';
-  const catStyle = { ANTIPATTERN: '#7f1d1d', REWRITE: '#1e3a5f', STYLE: '#14532d' };
-  const catBg    = { ANTIPATTERN: '#fee2e2', REWRITE: '#dbeafe', STYLE: '#dcfce7' };
+  if (!recs.length) return '<div class="empty-ok">✓ Sorguda belirgin anti-pattern tespit edilmedi.</div>';
+  // Deliberately off the CRITICAL/WARNING severity ramp — this badges the
+  // *kind* of recommendation, not its severity (priority already covers that).
+  const catStyle = { ANTIPATTERN: 'var(--serious-ink)', REWRITE: 'var(--accent-ink)', STYLE: 'var(--good-ink)' };
+  const catBg    = { ANTIPATTERN: 'var(--serious-tint)', REWRITE: 'var(--accent-tint)', STYLE: 'var(--good-tint)' };
   window.__qrecRewrites = {};
   return recs.map((r, i) => {
     let rewriteHtml = '';
@@ -547,9 +706,9 @@ function renderQueryRecs(recs, formattedSql) {
     }
     return `
     <div class="qrec">
-      <div class="qrec-header" style="background:${catBg[r.category]||'#f1f5f9'};color:${catStyle[r.category]||'#334155'}">
+      <div class="qrec-header" style="background:${catBg[r.category]||'var(--surface-2)'};color:${catStyle[r.category]||'var(--ink-2)'}">
         ${badge('pri-'+r.priority, r.priority)}
-        <span style="background:${catBg[r.category]||'#f1f5f9'};color:${catStyle[r.category]};font-size:.72rem;font-weight:700;padding:1px 7px;border-radius:10px;border:1px solid currentColor">${r.category}</span>
+        <span style="background:${catBg[r.category]||'var(--surface-2)'};color:${catStyle[r.category]};font-size:.68rem;font-weight:700;letter-spacing:.03em;text-transform:uppercase;padding:2px 9px;border-radius:var(--radius-pill);border:1px solid currentColor">${r.category}</span>
         ${esc(r.title)}
       </div>
       <div class="qrec-body">${esc(r.description)}</div>
@@ -573,15 +732,15 @@ function loadRewrittenQuery(id) {
 function renderAiFixBanner(fix) {
   if (!fix) return '';
   return `
-    <div class="res-card" style="border:2px solid #f59e0b;background:#fffbeb">
-      <div style="padding:12px 16px;font-weight:700;color:#92400e;font-size:.88rem">
+    <div class="res-card" style="border-color:var(--warning);background:var(--warning-tint)">
+      <div style="padding:13px 16px;font-weight:700;color:var(--warning-ink);font-size:.87rem">
         ⚠ Orijinal sorguda sözdizimi hatası vardı — 🤖 AI tarafından düzeltildi ve EXPLAIN ile doğrulandı
       </div>
-      <div style="padding:0 16px 12px">
-        <div class="qrec-label" style="padding-left:0">DÜZELTİLMİŞ SORGU</div>
+      <div style="padding:0 16px 13px">
+        <div class="qrec-label" style="padding-left:0;background:transparent">DÜZELTİLMİŞ SORGU</div>
         <div class="qrec-code">${renderRewriteHtml(fix.original_sql || '', fix.corrected_sql)}</div>
-        <div style="font-size:.8rem;color:#92400e;margin-top:6px">${esc(fix.explanation)}</div>
-        <div style="font-size:.72rem;color:#78350f;margin-top:6px">
+        <div style="font-size:.8rem;color:var(--warning-ink);margin-top:7px">${esc(fix.explanation)}</div>
+        <div style="font-size:.72rem;color:var(--ink-muted);margin-top:6px">
           Not: Bu düzeltme veritabanında geçerli bir plan ürettiği için doğrulandı;
           orijinal sorguyla aynı sonucu döndürdüğü garanti değildir.
         </div>
@@ -615,7 +774,7 @@ function renderAiRecommendation(rec, formattedSql) {
 
   window.__aiRecSql = rec.rewritten_sql;
   return `
-    <div class="qrec-body">${esc(rec.explanation)}</div>
+    <div class="qrec-body" style="color:var(--ai-ink);font-weight:500">${esc(rec.explanation)}</div>
     <div class="qrec-label">ÖNERİLEN SORGU (veritabanında EXPLAIN ile doğrulanmıştır)</div>
     <div class="qrec-code">${renderRewriteHtml(formattedSql || '', rec.rewritten_sql)}</div>
     <div class="qrec-gain">${gainText}</div>
@@ -623,7 +782,7 @@ function renderAiRecommendation(rec, formattedSql) {
       <button class="qrec-apply-btn" onclick="loadAiRecommendation()">Bu sorguyu editöre yükle</button>
     </div>
     ${newPlanHtml}
-    <div style="padding:8px 14px 12px;font-size:.72rem;color:#92400e;background:#f8fafc">
+    <div style="padding:8px 14px 12px;font-size:.72rem;color:var(--ink-muted);background:var(--surface-2)">
       ⚠ Bu öneri veritabanında geçerli ve daha ucuz çalıştığı için doğrulandı; orijinal sorguyla
       AYNI sonuç kümesini döndürdüğü garanti değildir — kullanmadan önce sonuçları karşılaştırın.
     </div>`;
@@ -649,44 +808,37 @@ function copyDDL(id) {
 // ---- Main render ----
 function renderResults(d) {
   const rootCost = d.plan_tree.total_cost || 1;
-  const scoreColor = d.score >= 75 ? 'fill-good' : d.score >= 50 ? 'fill-mid' : 'fill-bad';
+  const tone = d.score >= 75 ? 'good' : d.score >= 50 ? 'mid' : 'bad';
   const gradeDesc = {A:'Mükemmel',B:'İyi',C:'Orta — iyileştirme önerilir',D:'Zayıf',F:'Kritik'}[d.grade] || '';
 
   const timingHtml = d.has_actual
     ? `<span class="timing-pill">Planlama: ${d.planning_time.toFixed(3)}ms</span>
        <span class="timing-pill">Çalışma: ${d.execution_time.toFixed(3)}ms</span>
-       <span class="timing-pill" style="background:#dbeafe;color:#1d4ed8;font-weight:700">Toplam: ${(d.planning_time+d.execution_time).toFixed(3)}ms</span>`
+       <span class="timing-pill accent">Toplam: ${(d.planning_time+d.execution_time).toFixed(3)}ms</span>`
     : `<span class="timing-pill">EXPLAIN only (sorgu çalıştırılmadı)</span>`;
 
   const scoreHtml = `<div id="score-card">
     <div class="grade-badge grade-${d.grade}">${d.grade}</div>
     <div class="score-bar-wrap">
-      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-        <span style="font-weight:700;font-size:.9rem">Performans Skoru: <span style="font-size:1.1rem">${d.score}/100</span></span>
-        <span style="font-size:.82rem;color:#64748b">${gradeDesc}</span>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+        <span class="score-figure">${d.score}<small>/100 — Performans Skoru</small></span>
+        <span style="font-size:.82rem;color:var(--ink-2);font-weight:600">${gradeDesc}</span>
       </div>
-      <div class="score-bar-track"><div class="score-bar-fill ${scoreColor}" style="width:${d.score}%"></div></div>
+      <div class="score-bar-track track-${tone}"><div class="score-bar-fill fill-${tone}" style="width:${d.score}%"></div></div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:4px">${timingHtml}</div>
+    <div style="display:flex;flex-direction:column;gap:5px">${timingHtml}</div>
   </div>`;
 
   const fCount = d.findings.filter(f=>f.level==='CRITICAL').length;
   const wCount = d.findings.filter(f=>f.level==='WARNING').length;
-  const findBadge = fCount ? `<span class="badge-count" style="background:#fee2e2;color:#991b1b">${d.findings.length}</span>`
-                           : wCount ? `<span class="badge-count" style="background:#fef3c7;color:#92400e">${d.findings.length}</span>`
-                           : `<span class="badge-count" style="background:#dcfce7;color:#166534">${d.findings.length}</span>`;
-
-  const idxBadge = d.index_recommendations.length
-    ? `<span class="badge-count" style="background:#dbeafe;color:#1d4ed8">${d.index_recommendations.length}</span>` : null;
-  const qBadge = d.query_recommendations.length
-    ? `<span class="badge-count" style="background:#fef3c7;color:#92400e">${d.query_recommendations.length}</span>` : null;
+  const findTone = fCount ? 'critical' : wCount ? 'warning' : 'good';
 
   const html = renderAiFixBanner(d.ai_fix)
     + scoreHtml
     + card('📋 Execution Plan', null, `<div class="plan-tree">${renderNode(d.plan_tree, rootCost)}</div>`)
-    + card(`⚠ Plan Bulguları`, findBadge, renderFindings(d.findings))
-    + card(`📌 Index Önerileri`, idxBadge, renderIndexRecs(d.index_recommendations, d.unused_indexes))
-    + card(`✏ Sorgu Önerileri`, qBadge, renderQueryRecs(d.query_recommendations, lastAnalyzedSql))
+    + card(`⚠ Plan Bulguları`, d.findings.length, renderFindings(d.findings), findTone)
+    + card(`📌 Index Önerileri`, d.index_recommendations.length || null, renderIndexRecs(d.index_recommendations, d.unused_indexes), 'accent')
+    + card(`✏ Sorgu Önerileri`, d.query_recommendations.length || null, renderQueryRecs(d.query_recommendations, lastAnalyzedSql), 'warning')
     + (d.ai_recommendation ? card('🤖 AI Sorgu Önerisi (deneysel)', null, renderAiRecommendation(d.ai_recommendation, lastAnalyzedSql)) : '');
 
   document.getElementById('results-placeholder').style.display = 'none';
