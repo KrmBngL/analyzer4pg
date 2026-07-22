@@ -5,7 +5,6 @@ Serves the single-page UI and provides analysis API endpoints.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
@@ -42,27 +41,48 @@ def _make_db(data: dict) -> DatabaseConnection:
     return db
 
 
-def _verify_rewrite(db: DatabaseConnection, original_cost: float, rewritten_sql: str):
+def _verify_rewrite(db: DatabaseConnection, plan_result, rewritten_sql: str, use_analyze: bool):
     """
     A textual rewrite can be syntactically correct and still be a worse plan —
     it depends entirely on the target database's indexes, table sizes and
     statistics, which no static rule can know in advance. So before a rewrite
-    is ever shown, ask the real planner: EXPLAIN both queries and only keep
-    the rewrite if it's actually cheaper. Also doubles as a safety net against
-    a rewrite that doesn't even parse against the live schema.
-    Returns a cost-comparison dict, or None if the rewrite should be discarded.
+    is ever shown, ask the real database: when the original query was run with
+    EXPLAIN ANALYZE, actually execute the rewrite with EXPLAIN ANALYZE too and
+    compare real elapsed time — not a planner cost guess. Only fall back to
+    planner cost (EXPLAIN without ANALYZE) when the user chose not to execute
+    the original query either. Also doubles as a safety net against a rewrite
+    that doesn't even parse against the live schema.
+    Returns a comparison dict, or None if the rewrite should be discarded.
     """
+    if use_analyze and plan_result.has_actual:
+        try:
+            alt_plan = db.explain_query(rewritten_sql, use_analyze=True)
+            alt_time = alt_plan.get("Execution Time")
+        except Exception:
+            return None
+        original_time = plan_result.execution_time
+        if alt_time is None or original_time <= 0 or alt_time >= original_time * 0.98:
+            return None
+        return {
+            "verified_with": "analyze",
+            "time_before_ms": round(original_time, 3),
+            "time_after_ms": round(alt_time, 3),
+            "improvement_pct": round((original_time - alt_time) / original_time * 100, 1),
+        }
+
     try:
         alt_plan = db.explain_query(rewritten_sql, use_analyze=False)
         alt_cost = alt_plan.get("Plan", {}).get("Total Cost")
     except Exception:
         return None
+    original_cost = plan_result.root_node.total_cost
     if alt_cost is None or original_cost <= 0 or alt_cost >= original_cost * 0.98:
         return None
     return {
-        "estimated_cost_before": round(original_cost, 2),
-        "estimated_cost_after": round(alt_cost, 2),
-        "cost_improvement_pct": round((original_cost - alt_cost) / original_cost * 100, 1),
+        "verified_with": "cost",
+        "cost_before": round(original_cost, 2),
+        "cost_after": round(alt_cost, 2),
+        "improvement_pct": round((original_cost - alt_cost) / original_cost * 100, 1),
     }
 
 
@@ -161,13 +181,14 @@ def analyze():
         index_recs, unused = IndexAdvisor().advise(plan_result, db_conn=db)
         query_recs   = QueryAdvisor().advise(sql, db_conn=db)
 
-        # A rewritten_sql is only ever shown if EXPLAIN confirms it's actually
-        # cheaper on this database — see _verify_rewrite for why that matters.
+        # A rewritten_sql is only ever shown if EXPLAIN (ANALYZE, when the
+        # original query was) confirms it's actually cheaper on this database
+        # — see _verify_rewrite for why that matters.
         rewrite_costs = {}
         for i, r in enumerate(query_recs):
             if not r.rewritten_sql:
                 continue
-            info = _verify_rewrite(db, plan_result.root_node.total_cost, r.rewritten_sql)
+            info = _verify_rewrite(db, plan_result, r.rewritten_sql, use_analyze)
             if info is None:
                 r.rewritten_sql = None
             else:
@@ -236,9 +257,12 @@ def analyze():
                     "example_after": r.example_after,
                     "score_impact": r.score_impact,
                     "rewritten_sql": r.rewritten_sql,
-                    "estimated_cost_before": rewrite_costs.get(i, {}).get("estimated_cost_before"),
-                    "estimated_cost_after": rewrite_costs.get(i, {}).get("estimated_cost_after"),
-                    "cost_improvement_pct": rewrite_costs.get(i, {}).get("cost_improvement_pct"),
+                    "verified_with": rewrite_costs.get(i, {}).get("verified_with"),
+                    "time_before_ms": rewrite_costs.get(i, {}).get("time_before_ms"),
+                    "time_after_ms": rewrite_costs.get(i, {}).get("time_after_ms"),
+                    "cost_before": rewrite_costs.get(i, {}).get("cost_before"),
+                    "cost_after": rewrite_costs.get(i, {}).get("cost_after"),
+                    "improvement_pct": rewrite_costs.get(i, {}).get("improvement_pct"),
                 }
                 for i, r in enumerate(query_recs)
             ],

@@ -498,9 +498,11 @@ function renderQueryRecs(recs, formattedSql) {
     if (r.rewritten_sql) {
       const rid = 'qrw-' + i;
       window.__qrecRewrites[rid] = r.rewritten_sql;
-      const gainText = (r.estimated_cost_before != null && r.estimated_cost_after != null)
-        ? `📈 EXPLAIN ile doğrulandı: maliyet ${r.estimated_cost_before.toLocaleString('tr-TR')} → ${r.estimated_cost_after.toLocaleString('tr-TR')} (%${r.cost_improvement_pct} azalma)`
-        : '📈 Tahmini iyileştirme';
+      const gainText = r.verified_with === 'analyze'
+        ? `📈 EXPLAIN ANALYZE ile doğrulandı: gerçek süre ${r.time_before_ms.toLocaleString('tr-TR')}ms → ${r.time_after_ms.toLocaleString('tr-TR')}ms (%${r.improvement_pct} azalma)`
+        : r.verified_with === 'cost'
+        ? `📈 EXPLAIN ile doğrulandı: planlayıcı maliyeti ${r.cost_before.toLocaleString('tr-TR')} → ${r.cost_after.toLocaleString('tr-TR')} (%${r.improvement_pct} azalma)`
+        : '';
       rewriteHtml = `
         <div class="qrec-label">DÜZELTİLMİŞ SORGU (tam, veritabanınızda EXPLAIN ile doğrulanmıştır)</div>
         <div class="qrec-code">${renderRewriteHtml(formattedSql || '', r.rewritten_sql)}</div>
