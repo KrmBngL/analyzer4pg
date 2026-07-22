@@ -6,7 +6,6 @@ import psycopg2
 import psycopg2.extras
 from dataclasses import dataclass
 from typing import Optional
-import sys
 
 
 @dataclass

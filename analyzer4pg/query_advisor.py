@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import sqlparse
-from sqlparse.sql import IdentifierList, Identifier, Where, Parenthesis, Function
-from sqlparse.tokens import Keyword, DML, Wildcard, Punctuation
 
 
 # ---------------------------------------------------------------------------

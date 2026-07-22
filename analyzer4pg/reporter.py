@@ -4,7 +4,8 @@ reporter.py - Rich-based terminal report output for analyzer4pg
 
 from __future__ import annotations
 
-from typing import List, Optional
+import sys
+from typing import List
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,13 +13,23 @@ from rich.table import Table
 from rich.tree import Tree
 from rich.syntax import Syntax
 from rich.text import Text
-from rich.columns import Columns
 from rich import box
 from rich.rule import Rule
 
 from .plan_analyzer import PlanResult, PlanNode, Finding
 from .index_advisor import IndexRecommendation, UnusedIndexWarning
 from .query_advisor import QueryRecommendation
+
+if sys.platform == "win32":
+    # On Windows, stdout/stderr not attached to a real console (piped output,
+    # Git Bash/mintty, redirected files, CI) fall back to the process's ANSI
+    # codepage, which can't encode the ⚠/✓/→/🐘 symbols used in reports and
+    # crashes with UnicodeEncodeError. Force UTF-8 so output always works.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 console = Console()
 
@@ -77,7 +88,7 @@ def _node_label(node: PlanNode) -> Text:
     t.append(node.node_type, style=style)
 
     if node.relation_name:
-        t.append(f" on ", style="dim")
+        t.append(" on ", style="dim")
         t.append(node.relation_name, style="bold cyan")
         if node.alias and node.alias != node.relation_name:
             t.append(f" ({node.alias})", style="dim")
@@ -167,11 +178,11 @@ def print_plan_tree(plan_result: PlanResult) -> None:
     # Timing summary
     info_text = Text()
     if plan_result.has_actual:
-        info_text.append(f"  Planning: ", style="dim")
+        info_text.append("  Planning: ", style="dim")
         info_text.append(f"{plan_result.planning_time:.3f}ms", style="cyan")
-        info_text.append(f"   Execution: ", style="dim")
+        info_text.append("   Execution: ", style="dim")
         info_text.append(f"{plan_result.execution_time:.3f}ms", style="bold cyan")
-        info_text.append(f"   Total: ", style="dim")
+        info_text.append("   Total: ", style="dim")
         total = plan_result.planning_time + plan_result.execution_time
         info_text.append(f"{total:.3f}ms", style="bold cyan")
     else:
@@ -207,7 +218,7 @@ def print_findings(findings: List[Finding]) -> None:
         console.print(f"  {i}. {badge} [bold]{f.title}[/bold]{node_ref}")
         for line in f.description.split("\n"):
             console.print(f"     {line}", style="dim")
-        console.print(f"     [italic cyan]Öneri:[/italic cyan] ", end="")
+        console.print("     [italic cyan]Öneri:[/italic cyan] ", end="")
         for line in f.recommendation.split("\n"):
             console.print(f"[italic]{line}[/italic]")
         console.print()
@@ -322,7 +333,7 @@ def print_score_summary(
     # Score display
     bar = _score_bar(final_score)
     score_text = Text()
-    score_text.append(f"\n  Performans Skoru: ", style="bold")
+    score_text.append("\n  Performans Skoru: ", style="bold")
     score_text.append(f"{final_score}/100 ", style=grade_style + " bold")
     score_text.append("  ")
     score_text.append(bar)

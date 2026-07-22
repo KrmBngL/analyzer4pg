@@ -10,10 +10,7 @@ import getpass
 from typing import Optional
 
 import click
-from rich.console import Console
-from rich.rule import Rule
 from rich.prompt import Prompt
-from rich.text import Text
 from rich import box
 from rich.panel import Panel
 
@@ -302,9 +299,9 @@ def web_cmd(web_host, web_port, no_browser):
     url = f"http://{web_host if web_host != '0.0.0.0' else '127.0.0.1'}:{web_port}"
 
     console.print()
-    console.print(f"[bold cyan]🐘 analyzer4pg[/bold cyan] web arayüzü başlatılıyor...")
+    console.print("[bold cyan]🐘 analyzer4pg[/bold cyan] web arayüzü başlatılıyor...")
     console.print(f"   [green]→[/green] {url}")
-    console.print(f"   [dim]Durdurmak için: Ctrl+C[/dim]")
+    console.print("   [dim]Durdurmak için: Ctrl+C[/dim]")
     console.print()
 
     if not no_browser:
